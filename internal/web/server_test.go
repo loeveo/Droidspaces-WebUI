@@ -73,6 +73,7 @@ func installFakeDroidspaces(t *testing.T, dir string) {
 	}
 	path := filepath.Join(dir, "droidspaces")
 	script := `#!/bin/sh
+printf '%s\n' "$*" >> ./droidspaces-calls.log
 if [ "$1" = "--name" ] && [ "$3" = "enter" ]; then
   exec /bin/sh -i
 fi
@@ -144,6 +145,96 @@ func TestLocalRootfsListAndDownload(t *testing.T) {
 	handler.ServeHTTP(blocked, httptest.NewRequest(http.MethodGet, "/api/rootfs/local/download?token=secret&path="+url.QueryEscape(filepath.Join(t.TempDir(), "outside.img")), nil))
 	if blocked.Code != http.StatusForbidden {
 		t.Fatalf("outside path status=%d", blocked.Code)
+	}
+}
+
+func TestContainerCreateStartAndDeleteWorkflow(t *testing.T) {
+	srv, workspace, templateRoot := newTestServer(t)
+	templateDir := filepath.Join(templateRoot, "ubuntu-template")
+	mustWriteFile(t, filepath.Join(templateDir, "etc", "issue"), []byte("Ubuntu template"), 0644)
+
+	payload := `{
+		"name":"Ubuntu 24.04",
+		"hostname":"ubuntu-web",
+		"rootfsSource":"local",
+		"rootfsPath":"` + templateDir + `",
+		"netMode":"nat",
+		"dnsServers":"1.1.1.1,8.8.8.8",
+		"portForwards":"2222:22/tcp",
+		"bindMounts":"/sdcard:/mnt/sdcard:ro",
+		"customInit":"/sbin/init",
+		"env":"FOO=bar\nBAZ=qux",
+		"start":true,
+		"androidStorage":true,
+		"gpuMode":true,
+		"termuxX11":true,
+		"pulseAudio":true,
+		"volatileMode":true,
+		"disableIPv6":true
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/containers?token=secret", strings.NewReader(payload))
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", res.Code, res.Body.String())
+	}
+	var created struct {
+		Name         string `json:"name"`
+		ConfigPath   string `json:"configPath"`
+		ContainerDir string `json:"containerDir"`
+		StartOutput  string `json:"startOutput"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Name != "Ubuntu 24.04" {
+		t.Fatalf("created name = %q", created.Name)
+	}
+	if filepath.Base(created.ContainerDir) != "Ubuntu-24.04" {
+		t.Fatalf("container dir = %q", created.ContainerDir)
+	}
+	assertFile(t, filepath.Join(created.ContainerDir, "rootfs", "etc", "issue"), "Ubuntu template")
+	assertFile(t, filepath.Join(created.ContainerDir, ".env"), "FOO=bar\nBAZ=qux\n")
+
+	configData, err := os.ReadFile(created.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configText := string(configData)
+	for _, want := range []string{
+		"name=Ubuntu 24.04",
+		"hostname=ubuntu-web",
+		"rootfs_path=" + filepath.Join(created.ContainerDir, "rootfs"),
+		"net_mode=nat",
+		"disable_ipv6=1",
+		"enable_android_storage=1",
+		"enable_gpu_mode=1",
+		"enable_termux_x11=1",
+		"enable_pulseaudio=1",
+		"volatile_mode=1",
+		"dns_servers=1.1.1.1,8.8.8.8",
+		"port_forwards=2222:22/tcp",
+		"bind_mounts=/sdcard:/mnt/sdcard:ro",
+		"custom_init=/sbin/init",
+		"env_file=" + filepath.Join(workspace, "Containers", "Ubuntu-24.04", ".env"),
+	} {
+		if !strings.Contains(configText, want) {
+			t.Fatalf("container config missing %q:\n%s", want, configText)
+		}
+	}
+	calls := readOptionalFile(t, filepath.Join(workspace, "droidspaces-calls.log"))
+	if !strings.Contains(calls, "--config "+created.ConfigPath+" start") {
+		t.Fatalf("start command not recorded in calls %q", calls)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/containers/Ubuntu-24.04?token=secret", nil)
+	deleteRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteRes, deleteReq)
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleteRes.Code, deleteRes.Body.String())
+	}
+	if _, err := os.Stat(created.ContainerDir); !os.IsNotExist(err) {
+		t.Fatalf("container dir still exists or unexpected stat error: %v", err)
 	}
 }
 
@@ -355,6 +446,18 @@ func assertFile(t *testing.T, path string, want string) {
 	if string(data) != want {
 		t.Fatalf("%s = %q, want %q", path, string(data), want)
 	}
+}
+
+func readOptionalFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func writeTarGz(t *testing.T, path string, files map[string]string) {
