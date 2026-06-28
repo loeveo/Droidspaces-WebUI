@@ -1,0 +1,30 @@
+{
+  "_说明": "Droidspaces WebUI 默认配置模板。所有以下划线开头或带 _说明 后缀的字段都会被程序忽略，可以保留。",
+  "mode_说明": "监听模式。local 只允许本机/ADB forward 访问；public 用于局域网或公网访问，必须配置 authToken。",
+  "mode": "local",
+  "host_说明": "WebUI 监听地址。local 通常使用 127.0.0.1；public 通常使用 0.0.0.0。",
+  "host": "127.0.0.1",
+  "port_说明": "WebUI 监听端口，范围 1-65535。使用 adb forward 时电脑端和手机端通常都转发到这个端口。",
+  "port": 9090,
+  "authToken_说明": "Web API 授权密钥。public 模式必须填写；local 模式也可以填写以增加保护。浏览器首次访问会提示输入该 token。",
+  "authToken": "",
+  "droidspacesPath_说明": "Droidspaces 核心程序的完整路径。WebUI 的诊断命令会调用这个二进制。",
+  "droidspacesPath": "/data/local/Droidspaces/bin/droidspaces",
+  "corePath_说明": "Droidspaces 核心程序工作目录。不填写时默认取 droidspacesPath 的父目录。",
+  "corePath": "/data/local/Droidspaces/bin",
+  "imageRoot_说明": "容器镜像/rootfs 默认存放目录。不填写时默认与 corePath 相同。",
+  "imageRoot": "/data/local/Droidspaces/bin",
+  "templateImageRoot_说明": "模板镜像存放目录，用于放置可复用的 rootfs/img 模板。",
+  "templateImageRoot": "/data/local/Droidspaces/rootfs",
+  "workspace_说明": "Droidspaces 工作区路径，Android 默认是 /data/local/Droidspaces，Linux 默认是 /var/lib/Droidspaces。",
+  "workspace": "/data/local/Droidspaces",
+  "rootfsSkipTLSVerify_说明": "RootFS 仓库和下载请求是否跳过 TLS 证书校验。Android 精简环境缺少 CA 证书时 GitHub 可能报 x509 unknown authority，可保持 true；证书链正常且需要严格校验时改为 false。",
+  "rootfsSkipTLSVerify": true,
+  "rootfsRepositories_说明": "RootFS 云端列表。格式参考 Android App 的 RootfsRepository，URL 指向 rootfs.json。可以添加多个仓库。",
+  "rootfsRepositories": [
+    {
+      "name": "Droidspaces Official",
+      "url": "https://github.com/Droidspaces/Droidspaces-rootfs-builder/raw/refs/heads/main/rootfs.json"
+    }
+  ]
+}
