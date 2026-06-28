@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -238,6 +239,76 @@ func TestContainerCreateStartAndDeleteWorkflow(t *testing.T) {
 	}
 }
 
+func TestContainerExportTemplateAndDownloadWorkflow(t *testing.T) {
+	srv, workspace, templateRoot := newTestServer(t)
+	containerDir := filepath.Join(workspace, "Containers", "demo")
+	rootfsDir := filepath.Join(containerDir, "rootfs")
+	mustWriteFile(t, filepath.Join(rootfsDir, "etc", "issue"), []byte("export me"), 0644)
+	mustWriteFile(t, filepath.Join(containerDir, "container.config"), []byte("name=demo\nrootfs_path="+rootfsDir+"\nnet_mode=host\n"), 0644)
+
+	handler := srv.Handler()
+	backupTask := startContainerTask(t, handler, "/api/containers/demo/export?token=secret")
+	backup := waitForTaskDone(t, srv, backupTask)
+	if backup.Kind != "container-export" || backup.URL == "" || !strings.Contains(filepath.Base(backup.Path), "demo-backup-") {
+		t.Fatalf("unexpected backup task: %#v", backup)
+	}
+	if !strings.HasPrefix(backup.Path, filepath.Join(templateRoot, "exports")) {
+		t.Fatalf("backup path %q not under exports", backup.Path)
+	}
+	assertTarGzContains(t, backup.Path, "etc/issue", "export me")
+
+	downloadReq := httptest.NewRequest(http.MethodGet, backup.URL+"?token=secret", nil)
+	downloadRes := httptest.NewRecorder()
+	handler.ServeHTTP(downloadRes, downloadReq)
+	if downloadRes.Code != http.StatusOK || downloadRes.Body.Len() == 0 {
+		t.Fatalf("backup download status=%d size=%d", downloadRes.Code, downloadRes.Body.Len())
+	}
+
+	templateTask := startContainerTask(t, handler, "/api/containers/demo/template?token=secret")
+	template := waitForTaskDone(t, srv, templateTask)
+	if template.Kind != "container-template" || !strings.Contains(filepath.Base(template.Path), "demo-template-") {
+		t.Fatalf("unexpected template task: %#v", template)
+	}
+	if filepath.Dir(template.Path) != templateRoot {
+		t.Fatalf("template path %q not directly under template root %q", template.Path, templateRoot)
+	}
+	assertTarGzContains(t, template.Path, "etc/issue", "export me")
+}
+
+func startContainerTask(t *testing.T, handler http.Handler, path string) string {
+	t.Helper()
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, path, nil))
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("task start %s status=%d body=%s", path, res.Code, res.Body.String())
+	}
+	var accepted struct {
+		TaskID string `json:"taskId"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &accepted); err != nil || accepted.TaskID == "" {
+		t.Fatalf("bad task response id=%q err=%v body=%s", accepted.TaskID, err, res.Body.String())
+	}
+	return accepted.TaskID
+}
+
+func waitForTaskDone(t *testing.T, srv *Server, taskID string) *taskState {
+	t.Helper()
+	var task *taskState
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		var ok bool
+		task, ok = srv.getTask(taskID)
+		if ok && task.Status == "done" {
+			return task
+		}
+		if ok && task.Status == "error" {
+			t.Fatalf("task %s failed: %s", taskID, task.Error)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not complete: %#v", taskID, task)
+	return task
+}
+
 func TestRootfsDownloadTaskRecordsProgressAndDownloadURL(t *testing.T) {
 	assetBytes := []byte("rootfs-payload")
 	assetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +517,39 @@ func assertFile(t *testing.T, path string, want string) {
 	if string(data) != want {
 		t.Fatalf("%s = %q, want %q", path, string(data), want)
 	}
+}
+
+func assertTarGzContains(t *testing.T, path string, name string, want string) {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		header, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if strings.TrimPrefix(header.Name, "./") != name {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != want {
+			t.Fatalf("archive %s:%s = %q, want %q", path, name, string(data), want)
+		}
+		return
+	}
+	t.Fatalf("archive %s missing %s", path, name)
 }
 
 func readOptionalFile(t *testing.T, path string) string {
