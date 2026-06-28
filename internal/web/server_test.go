@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/ravindu644/droidspaces-oss/webui/internal/config"
 )
 
@@ -28,6 +30,7 @@ func newTestServer(t *testing.T) (*Server, string, string) {
 		t.Fatal(err)
 	}
 	installFakeBusybox(t, corePath)
+	installFakeDroidspaces(t, corePath)
 	srv, err := NewServer(Options{
 		DroidspacesPath:   filepath.Join(corePath, "droidspaces"),
 		Workspace:         workspace,
@@ -57,6 +60,26 @@ case "$cmd" in
   xzcat) exec xzcat "$@" ;;
   *) echo "unsupported busybox applet: $cmd" >&2; exit 127 ;;
 esac
+`
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func installFakeDroidspaces(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "droidspaces")
+	script := `#!/bin/sh
+if [ "$1" = "--name" ] && [ "$3" = "enter" ]; then
+  exec /bin/sh -i
+fi
+if [ "$1" = "pid" ]; then
+  exit 1
+fi
+printf 'fake droidspaces %s\n' "$*"
 `
 	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -219,6 +242,52 @@ func TestPrepareRootfsForContainerCopiesAndExtractsTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFile(t, filepath.Join(extracted, "etc", "os-release"), "NAME=test\n")
+}
+
+func TestShellWebSocketRunsInteractiveEnter(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/containers/demo/shell?token=secret&user=root"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("printf READY\\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	output := readWebSocketUntil(t, conn, "READY", 2*time.Second)
+	if !strings.Contains(output, "READY") {
+		t.Fatalf("shell output missing READY: %q", output)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("exit\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readWebSocketUntil(t *testing.T, conn *websocket.Conn, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var out strings.Builder
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+				continue
+			}
+			t.Fatal(err)
+		}
+		out.Write(data)
+		if strings.Contains(out.String(), want) {
+			return out.String()
+		}
+	}
+	t.Fatalf("timed out waiting for %q in %q", want, out.String())
+	return out.String()
 }
 
 func TestTerminalBufferHandlesCarriageReturnAndBackspace(t *testing.T) {
