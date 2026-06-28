@@ -81,6 +81,7 @@ make default-config
   "imageRoot": "/data/local/Droidspaces/bin",
   "templateImageRoot": "/data/local/Droidspaces/rootfs",
   "workspace": "/data/local/Droidspaces",
+  "socketdEnabled": true,
   "rootfsSkipTLSVerify": true,
   "rootfsRepositories": [
     {
@@ -102,8 +103,9 @@ make default-config
 - `imageRoot`: 容器镜像默认目录；不填时与 `corePath` 相同。
 - `templateImageRoot`: 模板镜像目录；当前 Android 模板默认是 `/data/local/Droidspaces/rootfs`。
 - `workspace`: Droidspaces 工作区路径。
+- `socketdEnabled`: 是否连接 Droidspaces socketd 后端；Android 真实部署建议为 `true`，本地调试或隔离验证可设为 `false`，避免读取到其他环境的全局 socketd 状态。
 - `rootfsSkipTLSVerify`: 是否跳过 RootFS 仓库和下载请求的 TLS 证书校验；Android 精简环境缺少 CA 证书时可保持 `true`。
-- `rootfsRepositories`: RootFS 云端列表仓库，格式与 Android App 的 `RootfsRepository` 使用的 `rootfs.json` 一致。
+- `rootfsRepositories`: RootFS 云端列表仓库，格式与 Android App 的 `RootfsRepository` 使用的 `rootfs.json` 一致；为空时会恢复内置官方仓库。
 
 加载顺序为：内置默认值 -> 配置文件 -> 环境变量 -> 命令行参数。
 
@@ -137,9 +139,21 @@ adb forward tcp:9090 tcp:9090
 http://127.0.0.1:9090
 ```
 
+## 本地冒烟验证
+
+在没有 Android 设备时，可以先验证 Linux 主机上的真实 WebUI 进程和 API 路径。脚本会创建临时 Droidspaces workspace、fake `droidspaces`/`busybox`，启动编译后的 WebUI，再访问主要 API：
+
+```sh
+cd webui
+make build
+make local-smoke
+```
+
+默认验证内容：`/api/status`、`/api/containers?all=1`、`/api/rootfs/local`、`/api/events`、`/api/containers/demo`。设置 `KEEP_WORKDIR=1` 可以保留临时目录和日志。
+
 ## Android 冒烟验证
 
-在有真实 Android 设备、ADB、root 权限和 Droidspaces 工作区的环境中，可以运行自动冒烟验证。脚本会构建产物推送为 smoke 专用文件，不覆盖正式 `webui.json`：
+在有真实 Android 设备、ADB、root 权限和 Droidspaces 工作区的环境中，可以运行自动冒烟验证。脚本使用已构建产物并推送为 smoke 专用文件，不覆盖正式 `webui.json`：
 
 ```sh
 cd webui
@@ -185,6 +199,7 @@ adb shell su -c 'cd /data/local/Droidspaces && ./droidspaces-webui-android-arm64
 - `DS_WEBUI_CORE_PATH`
 - `DS_WEBUI_IMAGE_ROOT`
 - `DS_WEBUI_TEMPLATE_IMAGE_ROOT`
+- `DS_WEBUI_SOCKETD_ENABLED`
 - `DS_WEBUI_ROOTFS_SKIP_TLS_VERIFY`
 
 ## 当前功能

@@ -25,7 +25,7 @@ func ReadSnapshot(workspace string, includeAll bool) (Snapshot, error) {
 	configs := readContainerConfigs(workspace)
 	running := readRunningPids(workspace)
 	seen := map[string]bool{}
-	var containers []socketd.Container
+	containers := make([]socketd.Container, 0, len(configs)+len(running))
 
 	for name, pid := range running {
 		container := configs[name]

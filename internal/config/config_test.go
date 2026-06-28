@@ -33,3 +33,19 @@ func TestImageRootsDefaultFromCorePath(t *testing.T) {
 		t.Fatalf("TemplateImageRoot = %q", cfg.TemplateImageRoot)
 	}
 }
+
+func TestSocketdEnabledCanBeOverridden(t *testing.T) {
+	cfg := Default()
+	cfg.SocketdEnabled = nil
+	t.Setenv("DS_WEBUI_SOCKETD_ENABLED", "false")
+	applyEnv(&cfg)
+	if cfg.SocketdEnabled == nil || *cfg.SocketdEnabled {
+		t.Fatalf("env socketd override not applied: %#v", cfg.SocketdEnabled)
+	}
+
+	enabled := true
+	applyOverrides(&cfg, CLIOverrides{SocketdEnabled: &enabled})
+	if cfg.SocketdEnabled == nil || !*cfg.SocketdEnabled {
+		t.Fatalf("cli socketd override not applied: %#v", cfg.SocketdEnabled)
+	}
+}

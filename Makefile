@@ -2,7 +2,7 @@ BINARY_NAME = droidspaces-webui
 OUT_DIR = output
 CMD = ./cmd/droidspaces-webui
 
-.PHONY: all build android-arm64 default-config run clean test android-smoke
+.PHONY: all build android-arm64 default-config run clean test local-smoke android-smoke
 
 all: build
 
@@ -30,6 +30,9 @@ test:
 clean:
 	@rm -rf $(OUT_DIR)
 	@echo "[+] Cleaned WebUI build artifacts"
+
+local-smoke:
+	./scripts/local-smoke.sh
 
 android-smoke:
 	./scripts/android-smoke.sh

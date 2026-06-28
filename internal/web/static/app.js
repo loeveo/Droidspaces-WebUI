@@ -734,7 +734,8 @@ function renderLocalRootfs() {
   }
   list.innerHTML = state.localRootfs.map((item) => {
     const canDownload = item.kind === "archive" || item.kind === "backup" || item.kind === "image";
-    const download = canDownload ? `<a class="text-btn" href="${escapeHTML(withAuthURL(`/api/rootfs/local/download?path=${encodeURIComponent(item.path)}`))}">下载</a>` : "";
+    const downloadURL = `/api/rootfs/local/download?path=${encodeURIComponent(item.path)}`;
+    const download = canDownload ? `<button class="text-btn" data-download-url="${escapeHTML(downloadURL)}" data-download-name="${escapeHTML(item.name)}">下载</button>` : "";
     return `<div class="rootfs-item compact-item"><h3>${escapeHTML(item.name)}</h3><div class="mono muted">${escapeHTML(kindText(item.kind))} · ${fmtSize(item.size)}</div><div class="mono muted path-line">${escapeHTML(item.path)}</div><div class="rootfs-foot"><button class="text-btn" data-use-local-rootfs="${escapeHTML(item.path)}">用于新建</button>${download}</div></div>`;
   }).join("");
 }
@@ -795,16 +796,36 @@ function renderTasks() {
   list.innerHTML = tasks.map((task) => {
     const pct = task.percent || 0;
     const status = task.status || "pending";
-    const link = task.url ? `<a class="text-btn" href="${escapeHTML(withAuthURL(task.url))}">下载</a>` : "";
+    const link = task.url ? `<button class="text-btn" data-download-url="${escapeHTML(task.url)}" data-download-name="${escapeHTML(task.name || task.kind || task.id)}">下载</button>` : "";
     return `<div class="task-item"><div><strong>${escapeHTML(task.name || task.kind || task.id)}</strong><span>${escapeHTML(status)} ${pct}%</span>${task.error ? `<div class="task-error">${escapeHTML(task.error)}</div>` : ""}</div><progress max="100" value="${pct}"></progress>${link}</div>`;
   }).join("");
 }
 
-function withAuthURL(url) {
-  const token = getAuthToken();
-  if (!token) return url;
-  const joiner = url.includes("?") ? "&" : "?";
-  return `${url}${joiner}token=${encodeURIComponent(token)}`;
+async function downloadFile(url, fallbackName = "download") {
+  setBusy(true);
+  try {
+    const response = await fetch(url, { headers: authHeaders() });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    const objectURL = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectURL;
+    link.download = filenameFromDisposition(response.headers.get("Content-Disposition")) || fallbackName || "download";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectURL);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function filenameFromDisposition(value) {
+  const match = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(value || "");
+  return match ? decodeURIComponent(match[1].trim()) : "";
 }
 
 async function exportContainer(name, asTemplate) {
@@ -930,6 +951,11 @@ document.addEventListener("click", (event) => {
     } catch (err) {
       toast(err.message);
     }
+    return;
+  }
+
+  if (button.dataset.downloadUrl) {
+    downloadFile(button.dataset.downloadUrl, button.dataset.downloadName || "download").catch((err) => toast(err.message));
     return;
   }
 

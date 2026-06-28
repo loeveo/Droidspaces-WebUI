@@ -27,6 +27,7 @@ type Config struct {
 	ImageRoot           string             `json:"imageRoot"`
 	TemplateImageRoot   string             `json:"templateImageRoot"`
 	Workspace           string             `json:"workspace"`
+	SocketdEnabled      *bool              `json:"socketdEnabled"`
 	RootfsRepositories  []RootfsRepository `json:"rootfsRepositories"`
 	RootfsSkipTLSVerify bool               `json:"rootfsSkipTLSVerify"`
 }
@@ -47,6 +48,7 @@ type CLIOverrides struct {
 	CorePath        string
 	ImageRoot       string
 	TemplateRoot    string
+	SocketdEnabled  *bool
 }
 
 const OfficialRootfsRepositoryURL = "https://github.com/Droidspaces/Droidspaces-rootfs-builder/raw/refs/heads/main/rootfs.json"
@@ -76,6 +78,7 @@ func Default() Config {
 	corePath := filepath.Dir(path)
 	imageRoot := corePath
 	templateRoot := filepath.Join(corePath, "templates")
+	socketdEnabled := IsAndroid()
 	if IsAndroid() {
 		templateRoot = filepath.Join(workspace, "rootfs")
 	}
@@ -89,6 +92,7 @@ func Default() Config {
 		ImageRoot:           imageRoot,
 		TemplateImageRoot:   templateRoot,
 		Workspace:           workspace,
+		SocketdEnabled:      &socketdEnabled,
 		RootfsSkipTLSVerify: IsAndroid(),
 		RootfsRepositories: []RootfsRepository{{
 			Name: "Droidspaces Official",
@@ -196,6 +200,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("DS_WEBUI_TEMPLATE_IMAGE_ROOT"); v != "" {
 		cfg.TemplateImageRoot = v
 	}
+	if v := os.Getenv("DS_WEBUI_SOCKETD_ENABLED"); v != "" {
+		if b, ok := parseBoolEnv(v); ok {
+			cfg.SocketdEnabled = &b
+		}
+	}
 	if v := os.Getenv("DS_WEBUI_ROOTFS_SKIP_TLS_VERIFY"); v != "" {
 		if b, ok := parseBoolEnv(v); ok {
 			cfg.RootfsSkipTLSVerify = b
@@ -233,6 +242,9 @@ func applyOverrides(cfg *Config, o CLIOverrides) {
 	}
 	if o.TemplateRoot != "" {
 		cfg.TemplateImageRoot = o.TemplateRoot
+	}
+	if o.SocketdEnabled != nil {
+		cfg.SocketdEnabled = o.SocketdEnabled
 	}
 }
 
@@ -301,6 +313,10 @@ func normalize(cfg *Config) error {
 		} else {
 			cfg.Workspace = "/var/lib/Droidspaces"
 		}
+	}
+	if cfg.SocketdEnabled == nil {
+		socketdEnabled := IsAndroid()
+		cfg.SocketdEnabled = &socketdEnabled
 	}
 	return nil
 }

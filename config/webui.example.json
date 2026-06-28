@@ -18,6 +18,8 @@
   "templateImageRoot": "/data/local/Droidspaces/rootfs",
   "workspace_说明": "Droidspaces 工作区路径，Android 默认是 /data/local/Droidspaces，Linux 默认是 /var/lib/Droidspaces。",
   "workspace": "/data/local/Droidspaces",
+  "socketdEnabled_说明": "是否使用 Droidspaces socketd 后端获取实时状态和生命周期控制。Android 真实部署建议为 true；本地调试或隔离测试可设为 false，状态读取只使用 WebUI 配置的 workspace。",
+  "socketdEnabled": true,
   "rootfsSkipTLSVerify_说明": "RootFS 仓库和下载请求是否跳过 TLS 证书校验。Android 精简环境缺少 CA 证书时 GitHub 可能报 x509 unknown authority，可保持 true；证书链正常且需要严格校验时改为 false。",
   "rootfsSkipTLSVerify": true,
   "rootfsRepositories_说明": "RootFS 云端列表。格式参考 Android App 的 RootfsRepository，URL 指向 rootfs.json。可以添加多个仓库。",

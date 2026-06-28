@@ -24,7 +24,15 @@ func main() {
 	corePath := flag.String("core-path", "", "Droidspaces core directory")
 	imageRoot := flag.String("image-root", "", "root directory for container images")
 	templateRoot := flag.String("template-image-root", "", "directory for template images")
+	socketdEnabled := flag.Bool("socketd-enabled", true, "enable socketd backend")
 	flag.Parse()
+
+	var socketdOverride *bool
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "socketd-enabled" {
+			socketdOverride = socketdEnabled
+		}
+	})
 
 	if *writeDefaultConfig {
 		if err := config.WriteDefault(*configPath); err != nil {
@@ -49,6 +57,7 @@ func main() {
 		CorePath:        *corePath,
 		ImageRoot:       *imageRoot,
 		TemplateRoot:    *templateRoot,
+		SocketdEnabled:  socketdOverride,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -63,6 +72,7 @@ func main() {
 		CorePath:            cfg.CorePath,
 		ImageRoot:           cfg.ImageRoot,
 		TemplateImageRoot:   cfg.TemplateImageRoot,
+		SocketdEnabled:      boolValue(cfg.SocketdEnabled),
 		RootfsRepos:         cfg.RootfsRepositories,
 		RootfsSkipTLSVerify: cfg.RootfsSkipTLSVerify,
 	})
@@ -86,4 +96,11 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func boolValue(v *bool) bool {
+	if v == nil {
+		return false
+	}
+	return *v
 }

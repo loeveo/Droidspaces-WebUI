@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/ravindu644/droidspaces-oss/webui/internal/config"
+	"github.com/ravindu644/droidspaces-oss/webui/internal/socketd"
 )
 
 func newTestServer(t *testing.T) (*Server, string, string) {
@@ -80,6 +81,14 @@ if [ "$1" = "--name" ] && [ "$3" = "enter" ]; then
 fi
 if [ "$1" = "pid" ]; then
   exit 1
+fi
+if [ "$1" = "--format" ] && [ "$2" = "show" ]; then
+  if [ -n "$FAKE_SHOW" ]; then printf '%s\n' "$FAKE_SHOW"; fi
+  exit 0
+fi
+if [ "$1" = "--name" ] && [ "$3" = "--format" ] && [ "$4" = "info" ]; then
+  if [ -n "$FAKE_INFO" ]; then printf '%s\n' "$FAKE_INFO"; fi
+  exit 0
 fi
 printf 'fake droidspaces %s\n' "$*"
 `
@@ -146,6 +155,101 @@ func TestLocalRootfsListAndDownload(t *testing.T) {
 	handler.ServeHTTP(blocked, httptest.NewRequest(http.MethodGet, "/api/rootfs/local/download?token=secret&path="+url.QueryEscape(filepath.Join(t.TempDir(), "outside.img")), nil))
 	if blocked.Code != http.StatusForbidden {
 		t.Fatalf("outside path status=%d", blocked.Code)
+	}
+}
+
+func TestLocalRootfsListEmptyItemsAreArray(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/rootfs/local?token=secret", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Items []localRootfsItem `json:"items"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Items == nil {
+		t.Fatalf("items decoded as nil; body=%s", res.Body.String())
+	}
+	if len(body.Items) != 0 {
+		t.Fatalf("items len=%d want 0: %#v", len(body.Items), body.Items)
+	}
+}
+
+func TestSocketdDisabledUsesConfiguredWorkspace(t *testing.T) {
+	srv, workspace, _ := newTestServer(t)
+	srv.socketdEnabled = false
+	containerDir := filepath.Join(workspace, "Containers", "demo")
+	rootfsDir := filepath.Join(containerDir, "rootfs")
+	mustWriteFile(t, filepath.Join(rootfsDir, "etc", "issue"), []byte("demo"), 0644)
+	mustWriteFile(t, filepath.Join(containerDir, "container.config"), []byte("name=demo\nrootfs_path="+rootfsDir+"\nnet_mode=host\n"), 0644)
+
+	handler := srv.Handler()
+	statusRes := httptest.NewRecorder()
+	handler.ServeHTTP(statusRes, httptest.NewRequest(http.MethodGet, "/api/status?token=secret", nil))
+	if statusRes.Code != http.StatusOK {
+		t.Fatalf("status code=%d body=%s", statusRes.Code, statusRes.Body.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(statusRes.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status["socketdEnabled"] != false || status["backend"] != "socketd-disabled" {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/containers?all=1&token=secret", nil))
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("list code=%d body=%s", listRes.Code, listRes.Body.String())
+	}
+	var list struct {
+		Containers []socketd.Container `json:"containers"`
+		Source     string              `json:"source"`
+	}
+	if err := json.Unmarshal(listRes.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Source != "workspace" {
+		t.Fatalf("source = %q", list.Source)
+	}
+	if len(list.Containers) != 1 || list.Containers[0].Name != "demo" {
+		t.Fatalf("unexpected containers: %#v", list.Containers)
+	}
+	if !strings.HasPrefix(list.Containers[0].RootFSPath, workspace) {
+		t.Fatalf("container rootfs %q outside workspace %q", list.Containers[0].RootFSPath, workspace)
+	}
+
+	srvEnv := "CONT_external=9999\nTOTAL_CONTAINERS=2"
+	t.Setenv("FAKE_SHOW", srvEnv)
+	t.Setenv("FAKE_INFO", "CONTAINER_NAME=external\nCONTAINER_PID=9999\nROOTFS_PATH=/outside/rootfs")
+	statusRes = httptest.NewRecorder()
+	handler.ServeHTTP(statusRes, httptest.NewRequest(http.MethodGet, "/api/status?token=secret", nil))
+	if statusRes.Code != http.StatusOK {
+		t.Fatalf("status with fake cli code=%d body=%s", statusRes.Code, statusRes.Body.String())
+	}
+	if err := json.Unmarshal(statusRes.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	info, ok := status["info"].(map[string]any)
+	if !ok || info["containersTotal"] != float64(1) {
+		t.Fatalf("status used external cli info: %#v", status)
+	}
+
+	inspectRes := httptest.NewRecorder()
+	handler.ServeHTTP(inspectRes, httptest.NewRequest(http.MethodGet, "/api/containers/demo?token=secret", nil))
+	if inspectRes.Code != http.StatusOK {
+		t.Fatalf("inspect code=%d body=%s", inspectRes.Code, inspectRes.Body.String())
+	}
+	var inspect inspectResponse
+	if err := json.Unmarshal(inspectRes.Body.Bytes(), &inspect); err != nil {
+		t.Fatal(err)
+	}
+	if inspect.Source != "workspace" || inspect.Name != "demo" || !strings.HasPrefix(inspect.RootFSPath, workspace) {
+		t.Fatalf("inspect used external cli data: %#v", inspect)
 	}
 }
 
@@ -404,6 +508,33 @@ func TestPrepareRootfsForContainerCopiesAndExtractsTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFile(t, filepath.Join(extracted, "etc", "os-release"), "NAME=test\n")
+}
+
+func TestWebSocketOriginAllowed(t *testing.T) {
+	cases := []struct {
+		name   string
+		host   string
+		origin string
+		want   bool
+	}{
+		{name: "no origin", host: "127.0.0.1:9090", want: true},
+		{name: "same origin", host: "example.test:9090", origin: "http://example.test:9090", want: true},
+		{name: "loopback host mismatch", host: "127.0.0.1:9090", origin: "http://localhost:9090", want: true},
+		{name: "cross site", host: "127.0.0.1:9090", origin: "https://evil.example", want: false},
+		{name: "bad origin", host: "127.0.0.1:9090", origin: "://bad", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/containers/demo/shell", nil)
+			req.Host = tc.host
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if got := websocketOriginAllowed(req); got != tc.want {
+				t.Fatalf("origin allowed = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestShellWebSocketRunsInteractiveEnter(t *testing.T) {

@@ -35,6 +35,19 @@ port_forwards=2222:22/tcp
 	}
 }
 
+func TestReadSnapshotEmptyContainersAreArray(t *testing.T) {
+	snap, err := ReadSnapshot(t.TempDir(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Containers == nil {
+		t.Fatal("empty snapshot containers is nil")
+	}
+	if len(snap.Containers) != 0 {
+		t.Fatalf("containers len=%d want 0", len(snap.Containers))
+	}
+}
+
 func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0755); err != nil {

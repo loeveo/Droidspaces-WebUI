@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +39,7 @@ var postExtractFixesScript string
 
 type Server struct {
 	socketd             *socketd.Client
+	socketdEnabled      bool
 	droidspacesPath     string
 	authToken           string
 	workspace           string
@@ -64,6 +66,7 @@ type Options struct {
 	TemplateImageRoot   string
 	RootfsRepos         []config.RootfsRepository
 	RootfsSkipTLSVerify bool
+	SocketdEnabled      bool
 }
 
 type apiError struct {
@@ -151,6 +154,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	return &Server{
 		socketd:             socketd.NewClient(6 * time.Second),
+		socketdEnabled:      opts.SocketdEnabled,
 		droidspacesPath:     path,
 		authToken:           opts.AuthToken,
 		workspace:           workspace,
@@ -274,9 +278,22 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"templateImageRoot":   s.templateImageRoot,
 		"rootfsRepoCount":     len(s.rootfsRepos),
 		"rootfsSkipTLSVerify": s.rootfsSkipTLSVerify,
+		"socketdEnabled":      s.socketdEnabled,
 		"workspace":           s.workspace,
 		"authEnabled":         s.authToken != "",
 		"listenHint":          "local 模式仅监听本机；public 模式请配置 authToken",
+	}
+
+	if !s.socketdEnabled {
+		status["backend"] = "socketd-disabled"
+		if snap, snapErr := workspace.ReadSnapshot(s.workspace, true); snapErr == nil {
+			status["info"] = snap.Info
+			status["fallbackSource"] = snap.Source
+		} else {
+			status["fallbackError"] = snapErr.Error()
+		}
+		writeJSON(w, http.StatusOK, status)
+		return
 	}
 
 	if err := s.socketd.Ping(ctx); err != nil {
@@ -327,24 +344,51 @@ func (s *Server) listContainers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 
+	if !s.socketdEnabled {
+		snap, snapErr := workspace.ReadSnapshot(s.workspace, includeAll)
+		if snapErr != nil {
+			writeBackendError(w, snapErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, containerListResponse(snap, nil))
+		return
+	}
+
+	var socketdErr error
 	containers, err := s.socketd.ListContainers(ctx, includeAll)
 	if err == nil {
 		containers = s.mergeWorkspaceContainers(containers, includeAll)
 		writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "source": "socketd"})
 		return
 	}
+	socketdErr = err
 
 	if snap, cliErr := s.cliSnapshot(ctx, includeAll); cliErr == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"containers": snap.Containers, "source": snap.Source, "backendError": err.Error(), "info": snap.Info})
+		writeJSON(w, http.StatusOK, containerListResponse(snap, socketdErr))
 		return
 	}
 
 	snap, snapErr := workspace.ReadSnapshot(s.workspace, includeAll)
 	if snapErr != nil {
-		writeBackendError(w, fmt.Errorf("socketd: %v; workspace fallback: %w", err, snapErr))
+		writeBackendError(w, fallbackError(socketdErr, snapErr))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"containers": snap.Containers, "source": snap.Source, "backendError": err.Error(), "info": snap.Info})
+	writeJSON(w, http.StatusOK, containerListResponse(snap, socketdErr))
+}
+
+func containerListResponse(snap workspace.Snapshot, backendErr error) map[string]any {
+	resp := map[string]any{"containers": snap.Containers, "source": snap.Source, "info": snap.Info}
+	if backendErr != nil {
+		resp["backendError"] = backendErr.Error()
+	}
+	return resp
+}
+
+func fallbackError(backendErr error, fallbackErr error) error {
+	if backendErr == nil {
+		return fallbackErr
+	}
+	return fmt.Errorf("socketd: %v; workspace fallback: %w", backendErr, fallbackErr)
 }
 
 func (s *Server) handleContainer(w http.ResponseWriter, r *http.Request) {
@@ -405,22 +449,40 @@ func (s *Server) inspectContainer(w http.ResponseWriter, r *http.Request, target
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
+	if !s.socketdEnabled {
+		fallback, fallbackErr := workspace.Inspect(s.workspace, target)
+		if fallbackErr != nil {
+			writeBackendError(w, fallbackErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, inspectResponse{Inspect: fallback, Source: "workspace"})
+		return
+	}
+
+	var socketdErr error
 	inspect, err := s.socketd.InspectContainer(ctx, target)
 	if err == nil {
 		writeJSON(w, http.StatusOK, inspectResponse{Inspect: inspect, Source: "socketd"})
 		return
 	}
+	socketdErr = err
 	if fallback, cliErr := s.inspectViaCLI(ctx, target); cliErr == nil {
-		fallback.BackendError = err.Error()
+		if socketdErr != nil {
+			fallback.BackendError = socketdErr.Error()
+		}
 		writeJSON(w, http.StatusOK, fallback)
 		return
 	}
 	fallback, fallbackErr := workspace.Inspect(s.workspace, target)
 	if fallbackErr != nil {
-		writeBackendError(w, fmt.Errorf("socketd: %v; workspace fallback: %w", err, fallbackErr))
+		writeBackendError(w, fallbackError(socketdErr, fallbackErr))
 		return
 	}
-	writeJSON(w, http.StatusOK, inspectResponse{Inspect: fallback, Source: "workspace", BackendError: err.Error()})
+	resp := inspectResponse{Inspect: fallback, Source: "workspace"}
+	if socketdErr != nil {
+		resp.BackendError = socketdErr.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) lifecycle(w http.ResponseWriter, r *http.Request, target string, action string) {
@@ -438,27 +500,31 @@ func (s *Server) lifecycle(w http.ResponseWriter, r *http.Request, target string
 	defer cancel()
 
 	var err error
-	socketdUsed := true
-	switch action {
-	case "start":
-		err = s.socketd.StartContainer(ctx, target)
-	case "stop":
-		err = s.socketd.StopContainer(ctx, target, timeoutSeconds)
-	case "restart":
-		err = s.socketd.RestartContainer(ctx, target, timeoutSeconds)
-	}
-	if err != nil {
-		socketdUsed = false
-		result, cliErr := s.lifecycleViaCLI(ctx, target, action)
-		if cliErr != nil {
-			writeJSON(w, http.StatusBadGateway, apiError{Error: fmt.Sprintf("socketd: %v; cli: %v\n%s", err, cliErr, result.Output)})
+	if s.socketdEnabled {
+		switch action {
+		case "start":
+			err = s.socketd.StartContainer(ctx, target)
+		case "stop":
+			err = s.socketd.StopContainer(ctx, target, timeoutSeconds)
+		case "restart":
+			err = s.socketd.RestartContainer(ctx, target, timeoutSeconds)
+		}
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": action, "target": target, "source": "socketd"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": action, "target": target, "source": "cli", "output": result.Output})
-		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": action, "target": target, "source": map[bool]string{true: "socketd", false: "cli"}[socketdUsed]})
+	result, cliErr := s.lifecycleViaCLI(ctx, target, action)
+	if cliErr != nil {
+		message := fmt.Sprintf("cli: %v\n%s", cliErr, result.Output)
+		if err != nil {
+			message = fmt.Sprintf("socketd: %v; %s", err, message)
+		}
+		writeJSON(w, http.StatusBadGateway, apiError{Error: message})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": action, "target": target, "source": "cli", "output": result.Output})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -479,6 +545,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
+
+	if !s.socketdEnabled {
+		writeJSON(w, http.StatusOK, map[string]any{"events": []socketd.Event{}, "source": "workspace", "backendError": "socketd disabled"})
+		return
+	}
 
 	events, err := s.socketd.PollEvents(ctx, since)
 	if err != nil {
@@ -754,8 +825,10 @@ func (s *Server) runExportTask(taskID string, target string, asTemplate bool) {
 }
 
 func (s *Server) inspectForExport(ctx context.Context, target string) (socketd.Inspect, error) {
-	if item, err := s.socketd.InspectContainer(ctx, target); err == nil {
-		return item, nil
+	if s.socketdEnabled {
+		if item, err := s.socketd.InspectContainer(ctx, target); err == nil {
+			return item, nil
+		}
 	}
 	if item, err := workspace.Inspect(s.workspace, target); err == nil {
 		return item, nil
@@ -979,9 +1052,39 @@ func (s *Server) execInContainer(w http.ResponseWriter, r *http.Request, target 
 var shellUpgrader = websocket.Upgrader{
 	ReadBufferSize:  8192,
 	WriteBufferSize: 8192,
-	CheckOrigin: func(r *http.Request) bool {
+	CheckOrigin:     websocketOriginAllowed,
+}
+
+func websocketOriginAllowed(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
 		return true
-	},
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	host := r.Host
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(parsed.Host, host) {
+		return true
+	}
+	originHost, _, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		originHost = parsed.Host
+	}
+	requestHost, _, err := net.SplitHostPort(host)
+	if err != nil {
+		requestHost = host
+	}
+	return isLoopbackHost(originHost) && isLoopbackHost(requestHost)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func (s *Server) shellContainer(w http.ResponseWriter, r *http.Request, target string) {
@@ -1264,6 +1367,12 @@ func (s *Server) inspectViaCLI(ctx context.Context, target string) (inspectRespo
 }
 
 func (s *Server) containerRunning(ctx context.Context, target string) (bool, int32) {
+	if !s.socketdEnabled {
+		if inspect, err := workspace.Inspect(s.workspace, target); err == nil && inspect.Running && inspect.PID > 0 {
+			return true, inspect.PID
+		}
+		return false, 0
+	}
 	result, err := s.runDroidspaces(ctx, "--name", target, "pid")
 	if err != nil {
 		return false, 0
@@ -1378,7 +1487,7 @@ func (s *Server) localRootfsItems() ([]localRootfsItem, error) {
 		roots = append(roots, s.imageRoot)
 	}
 	seen := map[string]bool{}
-	var items []localRootfsItem
+	items := make([]localRootfsItem, 0)
 	for _, root := range roots {
 		if root == "" {
 			continue
