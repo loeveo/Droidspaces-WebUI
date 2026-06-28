@@ -137,6 +137,32 @@ adb forward tcp:9090 tcp:9090
 http://127.0.0.1:9090
 ```
 
+## Android 冒烟验证
+
+在有真实 Android 设备、ADB、root 权限和 Droidspaces 工作区的环境中，可以运行自动冒烟验证。脚本会构建产物推送为 smoke 专用文件，不覆盖正式 `webui.json`：
+
+```sh
+cd webui
+make android-arm64 default-config
+make android-smoke
+```
+
+默认验证内容：启动 WebUI、建立 `adb forward`、访问 `/api/status`、`/api/containers?all=1`、`/api/rootfs/local`、`/api/events`，并校验返回 JSON 可解析。脚本结束时会停止 smoke WebUI；设置 `KEEP_RUNNING=1` 可保留进程继续手动验证。
+
+常用参数：
+
+```sh
+AUTH_TOKEN=change-me HOST_PORT=19090 DEVICE_PORT=19090 make android-smoke
+KEEP_RUNNING=1 make android-smoke
+PUSH=0 make android-smoke
+```
+
+脚本默认使用：
+
+- 远端二进制：`/data/local/Droidspaces/droidspaces-webui-smoke-android-arm64`
+- 远端配置：`/data/local/Droidspaces/webui-smoke.json`
+- 远端日志：`/data/local/Droidspaces/Logs/webui-smoke.log`
+
 如果要监听局域网地址，必须设置 token：
 
 ```sh
