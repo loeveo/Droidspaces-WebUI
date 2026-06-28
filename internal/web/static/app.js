@@ -8,6 +8,14 @@ const state = {
   terminalSocket: null,
   terminalConnected: false,
   terminalTarget: "",
+  terminalLines: [""],
+  terminalRow: 0,
+  terminalCol: 0,
+  currentView: "overview",
+  rootfsAssets: [],
+  localRootfs: [],
+  tasks: {},
+  createCloudTaskId: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -142,7 +150,6 @@ async function loadStatus() {
     "workspace-fallback": "工作区兜底",
   };
   $("#backendState").textContent = backendLabels[data.backend] || data.backend || "未知";
-  $("#workspacePath").textContent = data.workspace || "未知工作区";
   const info = data.info || {};
   $("#totalContainers").textContent = info.containersTotal ?? 0;
   $("#runningContainers").textContent = info.containersRunning ?? 0;
@@ -151,8 +158,7 @@ async function loadStatus() {
 }
 
 async function loadContainers() {
-  const includeAll = $("#includeStopped").checked ? "1" : "0";
-  const data = await api(`/api/containers?all=${includeAll}`);
+  const data = await api(`/api/containers?all=1`);
   state.containers = data.containers || [];
   if ((data.source === "workspace" || data.source === "cli") && data.backendError) {
     toast(data.source === "cli" ? "已使用 Droidspaces CLI 兜底读取容器状态" : "已使用工作区兜底读取容器状态");
@@ -164,7 +170,10 @@ async function loadContainers() {
 function renderContainers() {
   const tbody = $("#containerRows");
   const filter = $("#filterInput").value.trim().toLowerCase();
+  const stateFilter = $("#containerStateFilter")?.value || "all";
   const rows = state.containers.filter((container) => {
+    if (stateFilter === "running" && !container.running) return false;
+    if (stateFilter === "stopped" && container.running) return false;
     const haystack = [container.name, container.netMode, container.hostname, container.natIp]
       .join(" ")
       .toLowerCase();
@@ -191,7 +200,7 @@ function renderContainers() {
           <td><span class="badge ${statusClass}">${statusText}</span></td>
           <td class="mono">${pid}</td>
           <td>${escapeHTML(container.netMode || "-")}</td>
-          <td><div class="row-actions">${action}<button class="icon-btn" title="重启" aria-label="重启" data-action="restart" data-name="${encoded}">↻</button><button class="icon-btn" title="详情" aria-label="详情" data-action="inspect" data-name="${encoded}">ⓘ</button><button class="icon-btn" title="终端" aria-label="终端" data-action="terminal" data-name="${encoded}">⌁</button><button class="icon-btn danger" title="删除" aria-label="删除" data-action="delete" data-name="${encoded}">×</button></div></td>
+          <td><div class="row-actions">${action}<button class="icon-btn" title="重启" aria-label="重启" data-action="restart" data-name="${encoded}">↻</button><button class="icon-btn" title="详细参数" aria-label="详细参数" data-action="inspect" data-name="${encoded}">ⓘ</button><button class="icon-btn" title="终端" aria-label="终端" data-action="terminal" data-name="${encoded}">⌁</button><button class="icon-btn" title="打包备份" aria-label="打包备份" data-action="export" data-name="${encoded}">⇩</button><button class="icon-btn" title="转为模板" aria-label="转为模板" data-action="template" data-name="${encoded}">▣</button><button class="icon-btn danger" title="删除" aria-label="删除" data-action="delete" data-name="${encoded}">×</button></div></td>
         </tr>`;
     })
     .join("");
@@ -203,6 +212,7 @@ async function refreshAll() {
   try {
     await loadStatus();
     await loadContainers();
+    await loadLocalRootfs();
     if (state.selected) await inspect(state.selected, false);
     await loadEvents();
   } catch (err) {
@@ -216,8 +226,7 @@ async function inspect(name, showToast = true) {
   const data = await api(`/api/containers/${encodeURIComponent(name)}`);
   state.selected = name;
   $("#detailTitle").textContent = data.name || name;
-  $("#detailEmpty").classList.add("hidden");
-  $("#detailBody").classList.remove("hidden");
+  $("#detailPanel").classList.remove("hidden");
   $("#detailBody").innerHTML = renderDetail(data);
   if (showToast) toast("已加载详情");
 }
@@ -291,6 +300,7 @@ async function deleteContainer(name) {
 }
 
 function selectTerminal(name) {
+  $("#terminalPanel").classList.remove("hidden");
   $("#terminalTarget").value = name;
   $("#terminalScreen")?.focus();
   updateTerminalControls();
@@ -348,28 +358,140 @@ function terminalURL(target, user) {
   return `${protocol}//${window.location.host}/api/containers/${encodeURIComponent(target)}/shell?${params.toString()}`;
 }
 
-function appendTerminal(raw) {
+function ensureTerminalLine(row) {
+  while (state.terminalLines.length <= row) state.terminalLines.push("");
+}
+
+function applyTerminalCSI(sequence) {
+  const final = sequence.slice(-1);
+  const body = sequence.slice(0, -1).replace(/[?>]/g, "");
+  const nums = body
+    .split(";")
+    .filter(Boolean)
+    .map((part) => Number(part))
+    .map((value) => (Number.isFinite(value) && value > 0 ? value : 1));
+  const first = nums[0] || 1;
+  if (final === "A") state.terminalRow = Math.max(0, state.terminalRow - first);
+  else if (final === "B") {
+    state.terminalRow += first;
+    ensureTerminalLine(state.terminalRow);
+  } else if (final === "C") state.terminalCol += first;
+  else if (final === "D") state.terminalCol = Math.max(0, state.terminalCol - first);
+  else if (final === "G") state.terminalCol = Math.max(0, first - 1);
+  else if (final === "H" || final === "f") {
+    state.terminalRow = Math.max(0, (nums[0] || 1) - 1);
+    state.terminalCol = Math.max(0, (nums[1] || 1) - 1);
+    ensureTerminalLine(state.terminalRow);
+  } else if (final === "K") {
+    ensureTerminalLine(state.terminalRow);
+    const line = state.terminalLines[state.terminalRow] || "";
+    const mode = nums[0] || 0;
+    if (mode === 1) state.terminalLines[state.terminalRow] = line.slice(state.terminalCol);
+    else if (mode === 2) state.terminalLines[state.terminalRow] = "";
+    else state.terminalLines[state.terminalRow] = line.slice(0, state.terminalCol);
+  } else if (final === "J") {
+    const mode = nums[0] || 0;
+    if (mode === 2) {
+      state.terminalLines = [""];
+      state.terminalRow = 0;
+      state.terminalCol = 0;
+    } else {
+      ensureTerminalLine(state.terminalRow);
+      state.terminalLines[state.terminalRow] = (state.terminalLines[state.terminalRow] || "").slice(0, state.terminalCol);
+      state.terminalLines = state.terminalLines.slice(0, state.terminalRow + 1);
+    }
+  }
+}
+
+function appendTerminalChar(ch) {
+  ensureTerminalLine(state.terminalRow);
+  if (ch === "\r") {
+    state.terminalCol = 0;
+    return;
+  }
+  if (ch === "\n") {
+    state.terminalRow += 1;
+    state.terminalCol = 0;
+    ensureTerminalLine(state.terminalRow);
+    return;
+  }
+  if (ch === "\b" || ch === "\x7f") {
+    state.terminalCol = Math.max(0, state.terminalCol - 1);
+    return;
+  }
+  if (ch === "\t") {
+    const spaces = 8 - (state.terminalCol % 8);
+    for (let i = 0; i < spaces; i += 1) appendTerminalChar(" ");
+    return;
+  }
+  if (ch < " ") return;
+  const line = state.terminalLines[state.terminalRow] || "";
+  const padded = state.terminalCol > line.length ? `${line}${" ".repeat(state.terminalCol - line.length)}` : line;
+  state.terminalLines[state.terminalRow] = `${padded.slice(0, state.terminalCol)}${ch}${padded.slice(state.terminalCol + 1)}`;
+  state.terminalCol += 1;
+}
+
+function renderTerminalBuffer() {
   const screen = $("#terminalScreen");
   if (!screen) return;
-  let text = String(raw)
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "")
-    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
   if (!screen.dataset.active) {
     screen.textContent = "";
     screen.dataset.active = "1";
   }
-  for (const ch of text) {
-    if (ch === "\b" || ch === "\x7f") {
-      screen.textContent = screen.textContent.slice(0, -1);
-    } else if (ch !== "\x00") {
-      screen.textContent += ch;
-    }
+  if (state.terminalLines.length > 2000) {
+    const drop = state.terminalLines.length - 1600;
+    state.terminalLines.splice(0, drop);
+    state.terminalRow = Math.max(0, state.terminalRow - drop);
   }
-  if (screen.textContent.length > 200000) {
-    screen.textContent = screen.textContent.slice(-160000);
-  }
+  screen.textContent = state.terminalLines.join("\n");
   screen.scrollTop = screen.scrollHeight;
+}
+
+function appendTerminal(raw) {
+  const text = String(raw);
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "\x1b") {
+      const next = text[i + 1];
+      if (next === "[") {
+        let j = i + 2;
+        while (j < text.length && !/[@-~]/.test(text[j])) j += 1;
+        if (j < text.length) {
+          applyTerminalCSI(text.slice(i + 2, j + 1));
+          i = j;
+          continue;
+        }
+      } else if (next === "]") {
+        let j = i + 2;
+        while (j < text.length && text[j] !== "\x07") {
+          if (text[j] === "\x1b" && text[j + 1] === "\\") {
+            j += 1;
+            break;
+          }
+          j += 1;
+        }
+        i = j;
+        continue;
+      } else {
+        i += 1;
+        continue;
+      }
+    }
+    appendTerminalChar(ch);
+  }
+  renderTerminalBuffer();
+}
+
+function resetTerminalBuffer(initialText = "") {
+  state.terminalLines = [""];
+  state.terminalRow = 0;
+  state.terminalCol = 0;
+  const screen = $("#terminalScreen");
+  if (screen) {
+    screen.dataset.active = "1";
+    screen.textContent = "";
+  }
+  if (initialText) appendTerminal(initialText);
 }
 
 function sendTerminalRaw(value) {
@@ -404,9 +526,7 @@ function connectTerminal() {
     disconnectTerminal();
   }
   const user = $("#terminalUser").value.trim() || "root";
-  const screen = $("#terminalScreen");
-  screen.dataset.active = "1";
-  screen.textContent = `连接 ${target} (${user})...\n`;
+  resetTerminalBuffer(`连接 ${target} (${user})...\n`);
   state.terminalTarget = target;
   state.terminalConnected = false;
   const socket = new WebSocket(terminalURL(target, user));
@@ -454,8 +574,7 @@ function disconnectTerminal() {
 function clearTerminal() {
   const screen = $("#terminalScreen");
   if (!screen) return;
-  screen.dataset.active = "1";
-  screen.textContent = "";
+  resetTerminalBuffer();
   screen.focus();
 }
 
@@ -491,10 +610,14 @@ function handleTerminalKey(event) {
 
 async function createContainer(event) {
   event.preventDefault();
+  const source = document.querySelector('input[name="createSource"]:checked')?.value || "local";
+  const rootfsPath = source === "local" ? $("#createLocalRootfs").value : source === "direct" ? $("#createRootfs").value.trim() : "";
   const payload = {
     name: $("#createName").value.trim(),
     hostname: $("#createHostname").value.trim(),
-    rootfsPath: $("#createRootfs").value.trim(),
+    rootfsPath,
+    rootfsSource: source,
+    rootfsTaskId: source === "cloud" ? state.createCloudTaskId : "",
     netMode: $("#createNetMode").value,
     dnsServers: $("#createDns").value.trim(),
     portForwards: $("#createPorts").value.trim(),
@@ -525,6 +648,11 @@ async function createContainer(event) {
 
 function showCreateModal() {
   $("#createModal").classList.remove("hidden");
+  state.createCloudTaskId = "";
+  $("#createCloudTask").textContent = "";
+  updateCreateSourceUI();
+  renderCreateLocalOptions();
+  renderCreateCloudOptions();
   $("#createName").focus();
 }
 
@@ -535,8 +663,8 @@ function hideCreateModal() {
 function closeDetail() {
   state.selected = "";
   $("#detailTitle").textContent = "详情";
-  $("#detailBody").classList.add("hidden");
-  $("#detailEmpty").classList.remove("hidden");
+  $("#detailBody").innerHTML = "";
+  $("#detailPanel").classList.add("hidden");
 }
 
 async function loadRootfsAssets() {
@@ -546,8 +674,9 @@ async function loadRootfsAssets() {
   try {
     const arch = $("#rootfsArch").value;
     const data = await api(`/api/rootfs${arch ? `?arch=${encodeURIComponent(arch)}` : ""}`);
-    $("#rootfsMeta").textContent = `模板目录：${data.templateImageRoot || "-"}`;
-    renderRootfsAssets(data.assets || [], data.errors || []);
+    state.rootfsAssets = data.assets || [];
+    renderRootfsAssets(state.rootfsAssets, data.errors || []);
+    renderCreateCloudOptions();
   } catch (err) {
     list.innerHTML = `<div class="empty-state">${escapeHTML(err.message)}</div>`;
     toast(err.message);
@@ -575,12 +704,160 @@ async function downloadRootfs(asset) {
   setBusy(true);
   try {
     const data = await api("/api/rootfs/download", { method: "POST", body: JSON.stringify(asset) });
-    toast(`已下载到 ${data.path}`);
+    trackTask(data.taskId);
+    toast("已开始下载");
   } catch (err) {
     toast(err.message);
   } finally {
     setBusy(false);
   }
+}
+
+
+async function loadLocalRootfs() {
+  try {
+    const data = await api("/api/rootfs/local");
+    state.localRootfs = data.items || [];
+    $("#localRootfsCount").textContent = state.localRootfs.length;
+    renderLocalRootfs();
+    renderCreateLocalOptions();
+  } catch (err) {
+    $("#localRootfsList").innerHTML = `<div class="empty-state">${escapeHTML(err.message)}</div>`;
+  }
+}
+
+function renderLocalRootfs() {
+  const list = $("#localRootfsList");
+  if (!state.localRootfs.length) {
+    list.innerHTML = `<div class="empty-state">暂无本地模板</div>`;
+    return;
+  }
+  list.innerHTML = state.localRootfs.map((item) => {
+    const canDownload = item.kind === "archive" || item.kind === "backup" || item.kind === "image";
+    const download = canDownload ? `<a class="text-btn" href="${escapeHTML(withAuthURL(`/api/rootfs/local/download?path=${encodeURIComponent(item.path)}`))}">下载</a>` : "";
+    return `<div class="rootfs-item compact-item"><h3>${escapeHTML(item.name)}</h3><div class="mono muted">${escapeHTML(kindText(item.kind))} · ${fmtSize(item.size)}</div><div class="mono muted path-line">${escapeHTML(item.path)}</div><div class="rootfs-foot"><button class="text-btn" data-use-local-rootfs="${escapeHTML(item.path)}">用于新建</button>${download}</div></div>`;
+  }).join("");
+}
+
+function kindText(kind) {
+  const labels = { directory: "目录", image: "镜像", archive: "压缩包", backup: "备份" };
+  return labels[kind] || kind || "未知";
+}
+
+function renderCreateLocalOptions() {
+  const select = $("#createLocalRootfs");
+  if (!select) return;
+  if (!state.localRootfs.length) {
+    select.innerHTML = `<option value="">暂无本地模板</option>`;
+    return;
+  }
+  select.innerHTML = state.localRootfs.map((item) => `<option value="${escapeHTML(item.path)}">${escapeHTML(item.name)} (${escapeHTML(kindText(item.kind))})</option>`).join("");
+}
+
+function renderCreateCloudOptions() {
+  const select = $("#createCloudRootfs");
+  if (!select) return;
+  select.innerHTML = state.rootfsAssets.map((asset, index) => `<option value="${index}">${escapeHTML(asset.name || "未命名")} · ${escapeHTML(asset.architecture || "-")}</option>`).join("");
+}
+
+function trackTask(taskId, onDone) {
+  if (!taskId) return;
+  state.tasks[taskId] = { id: taskId, onDone };
+  renderTasks();
+  pollTask(taskId);
+}
+
+async function pollTask(taskId) {
+  try {
+    const task = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+    state.tasks[taskId] = { ...(state.tasks[taskId] || {}), ...task };
+    renderTasks();
+    if (task.status === "done") {
+      if (typeof state.tasks[taskId].onDone === "function") state.tasks[taskId].onDone(task);
+      await loadLocalRootfs();
+      return;
+    }
+    if (task.status === "error") return;
+    setTimeout(() => pollTask(taskId), 800);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function renderTasks() {
+  const list = $("#taskList");
+  if (!list) return;
+  const tasks = Object.values(state.tasks);
+  if (!tasks.length) {
+    list.innerHTML = "";
+    return;
+  }
+  list.innerHTML = tasks.map((task) => {
+    const pct = task.percent || 0;
+    const status = task.status || "pending";
+    const link = task.url ? `<a class="text-btn" href="${escapeHTML(withAuthURL(task.url))}">下载</a>` : "";
+    return `<div class="task-item"><div><strong>${escapeHTML(task.name || task.kind || task.id)}</strong><span>${escapeHTML(status)} ${pct}%</span>${task.error ? `<div class="task-error">${escapeHTML(task.error)}</div>` : ""}</div><progress max="100" value="${pct}"></progress>${link}</div>`;
+  }).join("");
+}
+
+function withAuthURL(url) {
+  const token = getAuthToken();
+  if (!token) return url;
+  const joiner = url.includes("?") ? "&" : "?";
+  return `${url}${joiner}token=${encodeURIComponent(token)}`;
+}
+
+async function exportContainer(name, asTemplate) {
+  const action = asTemplate ? "template" : "export";
+  setBusy(true);
+  try {
+    const data = await api(`/api/containers/${encodeURIComponent(name)}/${action}`, { method: "POST" });
+    trackTask(data.taskId);
+    switchView("rootfs");
+    toast(asTemplate ? "已开始转换为模板" : "已开始打包备份");
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function switchView(view) {
+  state.currentView = view;
+  $$(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+  $$(".view-panel").forEach((panel) => panel.classList.remove("active"));
+  $(`#${view}View`)?.classList.add("active");
+  const titles = { overview: "概览", containers: "容器列表", rootfs: "RootFS 管理", diagnostics: "诊断事件" };
+  $("#viewTitle").textContent = titles[view] || "Droidspaces";
+  if (view === "rootfs") {
+    loadLocalRootfs().catch((err) => toast(err.message));
+    if (!state.rootfsAssets.length) loadRootfsAssets().catch((err) => toast(err.message));
+  }
+}
+
+function updateCreateSourceUI() {
+  const source = document.querySelector('input[name="createSource"]:checked')?.value || "local";
+  $("#localSourceField").classList.toggle("hidden", source !== "local");
+  $("#cloudSourceField").classList.toggle("hidden", source !== "cloud");
+  $("#directSourceField").classList.toggle("hidden", source !== "direct");
+  if (source === "cloud" && !state.rootfsAssets.length) {
+    loadRootfsAssets().catch((err) => toast(err.message));
+  }
+}
+
+async function downloadSelectedCloudForCreate() {
+  const idx = Number($("#createCloudRootfs").value);
+  const asset = state.rootfsAssets[idx];
+  if (!asset) {
+    toast("请先选择云端镜像");
+    return;
+  }
+  const data = await api("/api/rootfs/download", { method: "POST", body: JSON.stringify(asset) });
+  state.createCloudTaskId = data.taskId;
+  trackTask(data.taskId, (task) => {
+    $("#createCloudTask").textContent = `已下载：${task.path || ""}`;
+  });
+  $("#createCloudTask").textContent = "下载中，完成后可直接创建";
 }
 
 async function runCLI(command) {
@@ -638,6 +915,8 @@ document.addEventListener("click", (event) => {
     const name = decodeURIComponent(encodedName);
     if (action === "inspect") inspect(name).catch((err) => toast(err.message));
     else if (action === "delete") deleteContainer(name);
+    else if (action === "export") exportContainer(name, false);
+    else if (action === "template") exportContainer(name, true);
     else if (action === "terminal") {
       selectTerminal(name);
       connectTerminal();
@@ -654,6 +933,14 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (button.dataset.useLocalRootfs) {
+    showCreateModal();
+    document.querySelector('input[name="createSource"][value="local"]').checked = true;
+    updateCreateSourceUI();
+    $("#createLocalRootfs").value = button.dataset.useLocalRootfs;
+    return;
+  }
+
   if (button.dataset.cli) runCLI(button.dataset.cli);
 });
 
@@ -665,6 +952,13 @@ function bindUI() {
   $("#createCloseBtn").addEventListener("click", hideCreateModal);
   $("#createCancelBtn").addEventListener("click", hideCreateModal);
   $("#createForm").addEventListener("submit", createContainer);
+  $$(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  $$('input[name="createSource"]').forEach((input) => input.addEventListener("change", updateCreateSourceUI));
+  $("#createCloudDownloadBtn").addEventListener("click", () => downloadSelectedCloudForCreate().catch((err) => toast(err.message)));
+  $("#createCloudRootfs").addEventListener("change", () => {
+    state.createCloudTaskId = "";
+    $("#createCloudTask").textContent = "";
+  });
   $("#terminalConnectBtn").addEventListener("click", connectTerminal);
   $("#terminalDisconnectBtn").addEventListener("click", disconnectTerminal);
   $("#terminalClearBtn").addEventListener("click", clearTerminal);
@@ -689,7 +983,7 @@ function bindUI() {
       sendTerminalInput();
     }
   });
-  $("#includeStopped").addEventListener("change", refreshAll);
+  $("#containerStateFilter").addEventListener("change", renderContainers);
   $("#filterInput").addEventListener("input", renderContainers);
   $("#closeDetailBtn").addEventListener("click", closeDetail);
   $("#loginForm").addEventListener("submit", async (event) => {

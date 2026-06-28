@@ -6,7 +6,7 @@ WebUI 优先通过 `droidspaces daemon` 启动的私有后端 socket
 `@droidspaces-socketd-backend` 获取容器列表、详情、事件并执行
 start/stop/restart。若 socketd 在 Android 上不可达，会从配置的 `workspace`
 读取 `Pids/*.pid` 和 `Containers/*/container.config` 作为状态兜底，至少显示
-正在运行的容器名称和 PID。诊断区只允许执行 `check`、`scan`、`show`、
+正在运行的容器名称和 PID。诊断区只允许执行 `check`、`mode`、`scan`、`show`、
 `version` 这几个只读或恢复类 CLI 命令。
 
 ## 部署位置
@@ -21,7 +21,7 @@ Codex 容器、ADB 主机或另一个容器里直接访问 Android 宿主上的 
 
 ## 构建
 
-WebUI 是独立套件，不挂靠主项目 Makefile。进入 `webui/` 目录构建：
+WebUI 是独立套件，不挂靠主项目 Makefile。`webui/` 目录也是独立 Git 仓库，后续可以在该目录内单独提交和查看版本变化记录。进入 `webui/` 目录构建：
 
 ```sh
 cd webui
@@ -163,14 +163,18 @@ adb shell su -c 'cd /data/local/Droidspaces && ./droidspaces-webui-android-arm64
 
 ## 当前功能
 
-- 查看 socketd 后端状态和容器统计
-- 查看全部或仅运行中的容器
-- 启动、停止、重启容器
-- 查看容器配置详情、绑定挂载、端口、资源限制和常用开关
-- 查看 Droidspaces 事件
-- 从配置的云端 RootFS 仓库获取列表
-- 下载 RootFS 模板到 `templateImageRoot`
-- 执行 `check`、`scan`、`show`、`version` 诊断命令
+- 概览页只显示统计和后端状态，不再置顶显示 Droidspaces 工作目录。
+- 容器列表在侧栏二级菜单中，支持按全部、运行中、未运行筛选。
+- 容器详情和终端只在容器列表中按需打开；详情仅点击“详细参数”后显示。
+- 支持启动、停止、重启、删除容器。
+- 支持通过 WebSocket PTY 连接容器 shell，并处理回车、退格和常见 ANSI 控制序列，减少终端输出错位。
+- 新建容器可选择本地模板、云端仓库镜像或直接指定 rootfs 路径。
+- 本地模板会复制到新容器目录；`.tar.gz`、`.tgz`、`.tar.xz` 会自动解包为 `rootfs/`；`.img` 会复制为 `rootfs.img`。
+- RootFS 仓库在侧栏二级菜单中，云端列表和本地模板/备份分开显示。
+- 云端 RootFS 下载以后台任务运行，WebUI 显示进度条；Android 缺 CA 证书时可用 `rootfsSkipTLSVerify`。
+- 支持将指定容器打包为 rootfs 备份，或转换为可复用模板。
+- 支持从 WebUI 下载生成的 rootfs 备份、模板压缩包和 `.img` 文件。
+- 诊断页支持 `mode`、`scan`、`show`、`version` 等受限 Droidspaces CLI 命令。
 
 ## 注意
 

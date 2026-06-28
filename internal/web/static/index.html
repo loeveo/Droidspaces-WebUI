@@ -7,154 +7,114 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div>
+    <div class="app-layout">
+      <aside class="sidebar" aria-label="导航">
+        <div class="brand-block">
           <h1>Droidspaces</h1>
-          <p id="workspacePath" class="muted mono">加载中</p>
+          <span id="backendState" class="backend-pill">未知</span>
         </div>
-        <div class="top-actions">
-          <button id="createBtn" class="text-btn primary" type="button">新建容器</button>
-          <label class="toggle">
-            <input id="includeStopped" type="checkbox" checked />
-            <span>全部</span>
-          </label>
-          <button id="refreshBtn" class="icon-btn primary" title="刷新" aria-label="刷新">↻</button>
-        </div>
-      </header>
+        <nav class="nav-menu">
+          <button class="nav-item active" type="button" data-view="overview">概览</button>
+          <button class="nav-item" type="button" data-view="containers">容器列表</button>
+          <button class="nav-item" type="button" data-view="rootfs">RootFS 仓库</button>
+          <button class="nav-item" type="button" data-view="diagnostics">诊断事件</button>
+        </nav>
+      </aside>
 
-      <main class="main-grid">
-        <section class="panel status-panel" aria-label="状态">
-          <div class="metric">
-            <span class="metric-label">后端</span>
-            <strong id="backendState">未知</strong>
+      <div class="content-shell">
+        <header class="topbar">
+          <div>
+            <h2 id="viewTitle">概览</h2>
           </div>
-          <div class="metric">
-            <span class="metric-label">总数</span>
-            <strong id="totalContainers">0</strong>
+          <div class="top-actions">
+            <button id="createBtn" class="text-btn primary" type="button">新建容器</button>
+            <button id="refreshBtn" class="icon-btn primary" title="刷新" aria-label="刷新">↻</button>
           </div>
-          <div class="metric">
-            <span class="metric-label">运行</span>
-            <strong id="runningContainers">0</strong>
-          </div>
-          <div class="metric">
-            <span class="metric-label">停止</span>
-            <strong id="stoppedContainers">0</strong>
-          </div>
-        </section>
+        </header>
 
-        <section class="panel containers-panel" aria-label="容器">
-          <div class="panel-head">
-            <h2>容器</h2>
-            <div class="search-wrap">
-              <input id="filterInput" type="search" placeholder="筛选名称、网络" />
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>名称</th>
-                  <th>状态</th>
-                  <th>PID</th>
-                  <th>网络</th>
-                  <th class="actions-col">操作</th>
-                </tr>
-              </thead>
-              <tbody id="containerRows">
-                <tr>
-                  <td colspan="5" class="empty">加载中</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+        <main class="view-stack">
+          <section id="overviewView" class="view-panel active" aria-label="概览">
+            <section class="panel status-panel" aria-label="状态">
+              <div class="metric"><span class="metric-label">总数</span><strong id="totalContainers">0</strong></div>
+              <div class="metric"><span class="metric-label">运行</span><strong id="runningContainers">0</strong></div>
+              <div class="metric"><span class="metric-label">停止</span><strong id="stoppedContainers">0</strong></div>
+              <div class="metric"><span class="metric-label">模板</span><strong id="localRootfsCount">0</strong></div>
+            </section>
+          </section>
 
-        <aside class="panel detail-panel" aria-label="详情">
-          <div class="panel-head">
-            <h2 id="detailTitle">详情</h2>
-            <button id="closeDetailBtn" class="icon-btn" title="关闭" aria-label="关闭">×</button>
-          </div>
-          <div id="detailEmpty" class="empty-state">未选择容器</div>
-          <div id="detailBody" class="detail-body hidden"></div>
-        </aside>
+          <section id="containersView" class="view-panel" aria-label="容器列表">
+            <section class="panel containers-panel">
+              <div class="panel-head split-head">
+                <h2>容器列表</h2>
+                <div class="filter-row">
+                  <select id="containerStateFilter" class="select-input" aria-label="状态筛选">
+                    <option value="all">全部</option>
+                    <option value="running">运行中</option>
+                    <option value="stopped">未运行</option>
+                  </select>
+                  <input id="filterInput" type="search" placeholder="筛选名称、网络" />
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>名称</th><th>状态</th><th>PID</th><th>网络</th><th class="actions-col">操作</th></tr>
+                  </thead>
+                  <tbody id="containerRows"><tr><td colspan="5" class="empty">加载中</td></tr></tbody>
+                </table>
+              </div>
+            </section>
 
-        <section class="panel rootfs-panel" aria-label="RootFS 仓库">
-          <div class="panel-head">
-            <h2>RootFS 仓库</h2>
-            <div class="tool-buttons">
-              <select id="rootfsArch" class="select-input" aria-label="架构">
-                <option value="">自动</option>
-                <option value="aarch64">aarch64</option>
-                <option value="armhf">armhf</option>
-                <option value="x86_64">x86_64</option>
-                <option value="x86">x86</option>
-              </select>
-              <button id="rootfsRefreshBtn" class="icon-btn" title="刷新 RootFS 列表" aria-label="刷新 RootFS 列表">↻</button>
-            </div>
-          </div>
-          <div class="rootfs-meta mono" id="rootfsMeta">模板目录：-</div>
-          <div id="rootfsList" class="rootfs-list">
-            <div class="empty-state">等待刷新</div>
-          </div>
-        </section>
+            <section id="detailPanel" class="panel detail-panel hidden" aria-label="详情">
+              <div class="panel-head"><h2 id="detailTitle">详情</h2><button id="closeDetailBtn" class="icon-btn" title="关闭" aria-label="关闭">×</button></div>
+              <div id="detailBody" class="detail-body"></div>
+            </section>
 
-        <section class="panel terminal-panel" aria-label="终端">
-          <div class="panel-head">
-            <h2>终端</h2>
-            <div class="terminal-target">
-              <select id="terminalTarget" class="select-input" aria-label="容器"></select>
-              <input id="terminalUser" class="small-input" type="text" value="root" aria-label="用户" />
-            </div>
-          </div>
-          <div class="terminal-body">
-            <div class="terminal-actions">
-              <span id="terminalStatus" class="terminal-status">未连接</span>
-              <button id="terminalConnectBtn" class="text-btn primary" type="button">连接 shell</button>
-              <button id="terminalDisconnectBtn" class="text-btn" type="button" disabled>断开</button>
-              <button id="terminalClearBtn" class="text-btn" type="button">清空</button>
-            </div>
-            <pre id="terminalScreen" class="terminal-screen" tabindex="0">选择正在运行的容器后连接 shell</pre>
-            <div class="terminal-input-row">
-              <textarea id="terminalInput" class="terminal-input" rows="2" spellcheck="false" placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea>
-              <button id="terminalSendBtn" class="text-btn primary" type="button">发送</button>
-            </div>
-          </div>
-        </section>
+            <section id="terminalPanel" class="panel terminal-panel hidden" aria-label="终端">
+              <div class="panel-head">
+                <h2>终端</h2>
+                <div class="terminal-target"><select id="terminalTarget" class="select-input" aria-label="容器"></select><input id="terminalUser" class="small-input" type="text" value="root" aria-label="用户" /></div>
+              </div>
+              <div class="terminal-body">
+                <div class="terminal-actions"><span id="terminalStatus" class="terminal-status">未连接</span><button id="terminalConnectBtn" class="text-btn primary" type="button">连接 shell</button><button id="terminalDisconnectBtn" class="text-btn" type="button" disabled>断开</button><button id="terminalClearBtn" class="text-btn" type="button">清空</button></div>
+                <div id="terminalScreen" class="terminal-screen" tabindex="0">选择正在运行的容器后连接 shell</div>
+                <div class="terminal-input-row"><textarea id="terminalInput" class="terminal-input" rows="2" spellcheck="false" placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea><button id="terminalSendBtn" class="text-btn primary" type="button">发送</button></div>
+              </div>
+            </section>
+          </section>
 
-        <section class="panel tools-panel" aria-label="工具">
-          <div class="panel-head">
-            <h2>诊断</h2>
-            <div class="tool-buttons">
-              <button class="text-btn" data-cli="mode">mode</button>
-              <button class="text-btn" data-cli="scan">scan</button>
-              <button class="text-btn" data-cli="show-format">show</button>
-              <button class="text-btn" data-cli="version">version</button>
-            </div>
-          </div>
-          <pre id="cliOutput" class="output">等待执行</pre>
-        </section>
+          <section id="rootfsView" class="view-panel" aria-label="RootFS 仓库">
+            <section class="panel rootfs-panel">
+              <div class="panel-head split-head">
+                <h2>RootFS 管理</h2>
+                <div class="tool-buttons"><select id="rootfsArch" class="select-input" aria-label="架构"><option value="">自动</option><option value="aarch64">aarch64</option><option value="armhf">armhf</option><option value="x86_64">x86_64</option><option value="x86">x86</option></select><button id="rootfsRefreshBtn" class="icon-btn" title="刷新 RootFS 列表" aria-label="刷新 RootFS 列表">↻</button></div>
+              </div>
+              <div class="rootfs-columns">
+                <div><h3>云端列表</h3><div id="rootfsList" class="rootfs-list"><div class="empty-state">等待刷新</div></div></div>
+                <div><h3>本地模板</h3><div id="localRootfsList" class="rootfs-list compact"><div class="empty-state">加载中</div></div></div>
+              </div>
+              <div id="taskList" class="task-list"></div>
+            </section>
+          </section>
 
-        <section class="panel events-panel" aria-label="事件">
-          <div class="panel-head">
-            <h2>事件</h2>
-            <button id="eventsBtn" class="icon-btn" title="刷新事件" aria-label="刷新事件">↻</button>
-          </div>
-          <div id="eventsList" class="events-list"></div>
-        </section>
-      </main>
+          <section id="diagnosticsView" class="view-panel" aria-label="诊断事件">
+            <section class="panel tools-panel"><div class="panel-head"><h2>诊断</h2><div class="tool-buttons"><button class="text-btn" data-cli="mode">mode</button><button class="text-btn" data-cli="scan">scan</button><button class="text-btn" data-cli="show-format">show</button><button class="text-btn" data-cli="version">version</button></div></div><pre id="cliOutput" class="output">等待执行</pre></section>
+            <section class="panel events-panel"><div class="panel-head"><h2>事件</h2><button id="eventsBtn" class="icon-btn" title="刷新事件" aria-label="刷新事件">↻</button></div><div id="eventsList" class="events-list"></div></section>
+          </section>
+        </main>
+      </div>
     </div>
 
     <div id="createModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="createTitle">
       <form id="createForm" class="modal-box create-box">
-        <div class="modal-head">
-          <h2 id="createTitle">新建容器</h2>
-          <button id="createCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button>
-        </div>
+        <div class="modal-head"><h2 id="createTitle">新建容器</h2><button id="createCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button></div>
+        <div class="source-tabs" role="tablist" aria-label="RootFS 来源"><label><input type="radio" name="createSource" value="local" checked />本地模板</label><label><input type="radio" name="createSource" value="cloud" />云端仓库</label><label><input type="radio" name="createSource" value="direct" />直接指定</label></div>
         <div class="form-grid">
           <label><span>名称</span><input id="createName" type="text" required placeholder="Ubuntu24.04" /></label>
           <label><span>主机名</span><input id="createHostname" type="text" placeholder="默认同名称" /></label>
-          <label class="wide"><span>RootFS 或镜像路径</span><input id="createRootfs" type="text" required placeholder="/data/local/Droidspaces/rootfs/ubuntu-rootfs" /></label>
+          <label id="localSourceField" class="wide"><span>本地模板镜像</span><select id="createLocalRootfs" class="select-input"></select></label>
+          <label id="cloudSourceField" class="wide hidden"><span>云端仓库镜像</span><select id="createCloudRootfs" class="select-input"></select><button id="createCloudDownloadBtn" class="text-btn" type="button">下载所选镜像</button><div id="createCloudTask" class="inline-progress"></div></label>
+          <label id="directSourceField" class="wide hidden"><span>RootFS 或镜像路径</span><input id="createRootfs" type="text" placeholder="/data/local/Droidspaces/Containers/name/rootfs 或 rootfs.img" /></label>
           <label><span>网络</span><select id="createNetMode"><option value="host">host</option><option value="nat">nat</option><option value="none">none</option><option value="gateway">gateway</option></select></label>
           <label><span>DNS</span><input id="createDns" type="text" placeholder="1.1.1.1,8.8.8.8" /></label>
           <label class="wide"><span>端口转发</span><input id="createPorts" type="text" placeholder="2222:22/tcp,8080:80/tcp" /></label>
@@ -162,30 +122,13 @@
           <label><span>Init</span><input id="createInit" type="text" placeholder="/sbin/init" /></label>
           <label class="check"><input id="createStart" type="checkbox" /><span>创建后启动</span></label>
         </div>
-        <div class="check-grid">
-          <label><input id="createAndroidStorage" type="checkbox" />Android 存储</label>
-          <label><input id="createGpu" type="checkbox" />GPU</label>
-          <label><input id="createTermuxX11" type="checkbox" />Termux X11</label>
-          <label><input id="createPulse" type="checkbox" />PulseAudio</label>
-          <label><input id="createVolatile" type="checkbox" />易失模式</label>
-          <label><input id="createDisableIpv6" type="checkbox" />禁用 IPv6</label>
-        </div>
+        <div class="check-grid"><label><input id="createAndroidStorage" type="checkbox" />Android 存储</label><label><input id="createGpu" type="checkbox" />GPU</label><label><input id="createTermuxX11" type="checkbox" />Termux X11</label><label><input id="createPulse" type="checkbox" />PulseAudio</label><label><input id="createVolatile" type="checkbox" />易失模式</label><label><input id="createDisableIpv6" type="checkbox" />禁用 IPv6</label></div>
         <label class="env-field"><span>环境变量 .env</span><textarea id="createEnv" spellcheck="false" placeholder="KEY=value"></textarea></label>
-        <div class="modal-actions">
-          <button class="text-btn" type="button" id="createCancelBtn">取消</button>
-          <button class="text-btn primary" type="submit">创建</button>
-        </div>
+        <div class="modal-actions"><button class="text-btn" type="button" id="createCancelBtn">取消</button><button class="text-btn primary" type="submit">创建</button></div>
       </form>
     </div>
 
-    <div id="loginOverlay" class="login-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
-      <form id="loginForm" class="login-box">
-        <h2 id="loginTitle">WebUI 授权</h2>
-        <input id="loginToken" type="password" autocomplete="current-password" placeholder="输入 authToken" />
-        <button class="text-btn primary" type="submit">进入</button>
-        <div id="loginError" class="login-error"></div>
-      </form>
-    </div>
+    <div id="loginOverlay" class="login-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="loginTitle"><form id="loginForm" class="login-box"><h2 id="loginTitle">WebUI 授权</h2><input id="loginToken" type="password" autocomplete="current-password" placeholder="输入 authToken" /><button class="text-btn primary" type="submit">进入</button><div id="loginError" class="login-error"></div></form></div>
     <div id="toast" class="toast hidden"></div>
     <script src="/app.js" defer></script>
   </body>

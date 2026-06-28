@@ -180,7 +180,13 @@ func sanitize(value string) string {
 	return strings.Trim(value, "-")
 }
 
+type ProgressFunc func(downloaded int64, total int64)
+
 func (c *Client) Download(ctx context.Context, asset Asset, templateRoot string) (string, error) {
+	return c.DownloadWithProgress(ctx, asset, templateRoot, nil)
+}
+
+func (c *Client) DownloadWithProgress(ctx context.Context, asset Asset, templateRoot string, progress ProgressFunc) (string, error) {
 	if templateRoot == "" {
 		return "", fmt.Errorf("template image root is empty")
 	}
@@ -217,7 +223,14 @@ func (c *Client) Download(ctx context.Context, asset Asset, templateRoot string)
 	if err != nil {
 		return "", err
 	}
-	_, copyErr := io.Copy(out, resp.Body)
+	total := resp.ContentLength
+	if asset.SizeBytes > 0 {
+		total = asset.SizeBytes
+	}
+	if progress != nil {
+		progress(0, total)
+	}
+	_, copyErr := io.Copy(out, &progressReader{reader: resp.Body, total: total, progress: progress})
 	closeErr := out.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
@@ -231,5 +244,28 @@ func (c *Client) Download(ctx context.Context, asset Asset, templateRoot string)
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	if progress != nil {
+		if info, statErr := os.Stat(dest); statErr == nil {
+			progress(info.Size(), total)
+		}
+	}
 	return dest, nil
+}
+
+type progressReader struct {
+	reader   io.Reader
+	done     int64
+	total    int64
+	progress ProgressFunc
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.done += int64(n)
+		if r.progress != nil {
+			r.progress(r.done, r.total)
+		}
+	}
+	return n, err
 }

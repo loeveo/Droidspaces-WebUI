@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,9 @@ import (
 //go:embed static/*
 var staticFiles embed.FS
 
+//go:embed scripts/post_extract_fixes.sh
+var postExtractFixesScript string
+
 type Server struct {
 	socketd             *socketd.Client
 	droidspacesPath     string
@@ -45,6 +49,8 @@ type Server struct {
 	rootfsRepos         []config.RootfsRepository
 	rootfsClient        *rootfs.Client
 	rootfsSkipTLSVerify bool
+	tasksMu             sync.RWMutex
+	tasks               map[string]*taskState
 }
 
 type Options struct {
@@ -76,6 +82,8 @@ type createContainerRequest struct {
 	Name              string `json:"name"`
 	Hostname          string `json:"hostname"`
 	RootFSPath        string `json:"rootfsPath"`
+	RootFSSource      string `json:"rootfsSource"`
+	RootFSTaskID      string `json:"rootfsTaskId"`
 	NetMode           string `json:"netMode"`
 	DNSServers        string `json:"dnsServers"`
 	PortForwards      string `json:"portForwards"`
@@ -107,6 +115,29 @@ type cliCommandResult struct {
 	Output   string   `json:"output"`
 }
 
+type taskState struct {
+	ID         string `json:"id"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Downloaded int64  `json:"downloaded,omitempty"`
+	Total      int64  `json:"total,omitempty"`
+	Percent    int    `json:"percent"`
+	Path       string `json:"path,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Error      string `json:"error,omitempty"`
+	StartedAt  int64  `json:"startedAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
+}
+
+type localRootfsItem struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Kind     string `json:"kind"`
+	Size     int64  `json:"size"`
+	Modified int64  `json:"modified"`
+}
+
 func NewServer(opts Options) (*Server, error) {
 	path := opts.DroidspacesPath
 	if path == "" {
@@ -131,6 +162,7 @@ func NewServer(opts Options) (*Server, error) {
 		rootfsRepos:         opts.RootfsRepos,
 		rootfsClient:        rootfs.NewClient(opts.RootfsSkipTLSVerify),
 		rootfsSkipTLSVerify: opts.RootfsSkipTLSVerify,
+		tasks:               map[string]*taskState{},
 	}, nil
 }
 
@@ -143,7 +175,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/containers/", s.withAuth(s.handleContainer))
 	mux.HandleFunc("/api/events", s.withAuth(s.handleEvents))
 	mux.HandleFunc("/api/rootfs", s.withAuth(s.handleRootfsList))
+	mux.HandleFunc("/api/rootfs/local", s.withAuth(s.handleLocalRootfsList))
+	mux.HandleFunc("/api/rootfs/local/download", s.withAuth(s.handleLocalRootfsDownload))
 	mux.HandleFunc("/api/rootfs/download", s.withAuth(s.handleRootfsDownload))
+	mux.HandleFunc("/api/tasks/", s.withAuth(s.handleTask))
+	mux.HandleFunc("/api/downloads/", s.withAuth(s.handleDownload))
 	mux.HandleFunc("/api/cli", s.withAuth(s.handleCLI))
 
 	sub, _ := fs.Sub(staticFiles, "static")
@@ -356,6 +392,10 @@ func (s *Server) handleContainer(w http.ResponseWriter, r *http.Request) {
 		s.lifecycle(w, r, target, "restart")
 	case "exec":
 		s.execInContainer(w, r, target)
+	case "export":
+		s.exportContainer(w, r, target, false)
+	case "template":
+		s.exportContainer(w, r, target, true)
 	default:
 		writeJSON(w, http.StatusNotFound, apiError{Error: "unknown container action"})
 	}
@@ -487,6 +527,46 @@ func (s *Server) handleRootfsList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleLocalRootfsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	items, err := s.localRootfsItems()
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "templateImageRoot": s.templateImageRoot})
+}
+
+func (s *Server) handleLocalRootfsDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" || hasConfigUnsafeChars(path) || !filepath.IsAbs(path) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid path"})
+		return
+	}
+	if !s.pathWithinManagedRoots(path) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "path is outside managed roots"})
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: err.Error()})
+		return
+	}
+	if info.IsDir() || (!isRootfsArchive(path) && !strings.HasSuffix(strings.ToLower(path), ".img")) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "only rootfs image or archive files can be downloaded directly"})
+		return
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
+	http.ServeFile(w, r, path)
+}
+
 type rootfsDownloadRequest struct {
 	Name           string `json:"name"`
 	Description    string `json:"description"`
@@ -543,12 +623,145 @@ func (s *Server) handleRootfsDownload(w http.ResponseWriter, r *http.Request) {
 		asset.UniqueFilename = rootfs.UniqueFilename(asset)
 	}
 
-	path, err := s.rootfsClient.Download(ctx, asset, s.templateImageRoot)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+	task := s.newTask("rootfs-download", asset.Name)
+	task.Total = asset.SizeBytes
+	s.updateTask(task.ID, func(t *taskState) {
+		t.Status = "running"
+	})
+	go func() {
+		path, err := s.rootfsClient.DownloadWithProgress(context.Background(), asset, s.templateImageRoot, func(downloaded int64, total int64) {
+			s.updateTask(task.ID, func(t *taskState) {
+				t.Downloaded = downloaded
+				t.Total = total
+				if total > 0 {
+					t.Percent = int(downloaded * 100 / total)
+				}
+			})
+		})
+		if err != nil {
+			s.failTask(task.ID, err)
+			return
+		}
+		s.completeTask(task.ID, path, "/api/rootfs/local/download?path="+url.QueryEscape(path))
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "taskId": task.ID, "task": task})
+}
+
+func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": path})
+	id := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	if id == "" || strings.ContainsAny(id, `/\\`) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid task id"})
+		return
+	}
+	task, ok := s.getTask(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "task not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/downloads/")
+	if id == "" || strings.ContainsAny(id, `/\\`) {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid download id"})
+		return
+	}
+	task, ok := s.getTask(id)
+	if !ok || task.Path == "" || task.Status != "done" {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "download not ready"})
+		return
+	}
+	if !s.pathWithinManagedRoots(task.Path) {
+		writeJSON(w, http.StatusForbidden, apiError{Error: "download path is outside managed roots"})
+		return
+	}
+	name := filepath.Base(task.Path)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	http.ServeFile(w, r, task.Path)
+}
+
+func (s *Server) exportContainer(w http.ResponseWriter, r *http.Request, target string, asTemplate bool) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	kind := "container-export"
+	if asTemplate {
+		kind = "container-template"
+	}
+	task := s.newTask(kind, target)
+	s.updateTask(task.ID, func(t *taskState) { t.Status = "running" })
+	go s.runExportTask(task.ID, target, asTemplate)
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "taskId": task.ID, "task": task})
+}
+
+func (s *Server) runExportTask(taskID string, target string, asTemplate bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+	if running, _ := s.containerRunning(ctx, target); running {
+		result, err := s.lifecycleViaCLI(ctx, target, "stop")
+		if err != nil {
+			s.failTask(taskID, fmt.Errorf("failed to stop container before export: %v\n%s", err, result.Output))
+			return
+		}
+	}
+	inspect, err := s.inspectForExport(ctx, target)
+	if err != nil {
+		s.failTask(taskID, err)
+		return
+	}
+	rootfsPath := strings.TrimSpace(inspect.RootFSPath)
+	if rootfsPath == "" {
+		s.failTask(taskID, fmt.Errorf("container rootfs path is empty"))
+		return
+	}
+	if _, err := os.Stat(rootfsPath); err != nil {
+		s.failTask(taskID, fmt.Errorf("rootfs is not accessible: %w", err))
+		return
+	}
+	outDir := filepath.Join(s.templateImageRoot, "exports")
+	if asTemplate {
+		outDir = s.templateImageRoot
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		s.failTask(taskID, err)
+		return
+	}
+	filename := sanitizeDownloadName(target)
+	if asTemplate {
+		filename += "-template"
+	} else {
+		filename += "-backup"
+	}
+	filename += "-" + time.Now().Format("20060102-150405") + ".tar.gz"
+	dest := filepath.Join(outDir, filename)
+	if err := s.createRootfsArchive(ctx, rootfsPath, dest, taskID); err != nil {
+		_ = os.Remove(dest)
+		s.failTask(taskID, err)
+		return
+	}
+	url := "/api/downloads/" + taskID
+	s.completeTask(taskID, dest, url)
+}
+
+func (s *Server) inspectForExport(ctx context.Context, target string) (socketd.Inspect, error) {
+	if item, err := s.socketd.InspectContainer(ctx, target); err == nil {
+		return item, nil
+	}
+	if item, err := workspace.Inspect(s.workspace, target); err == nil {
+		return item, nil
+	}
+	item, err := s.inspectViaCLI(ctx, target)
+	return item.Inspect, err
 }
 
 func (s *Server) handleCLI(w http.ResponseWriter, r *http.Request) {
@@ -591,15 +804,6 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid container name"})
 		return
 	}
-	rootfsPath := strings.TrimSpace(req.RootFSPath)
-	if rootfsPath == "" || hasConfigUnsafeChars(rootfsPath) || !filepath.IsAbs(rootfsPath) {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: "rootfsPath must be an absolute path"})
-		return
-	}
-	if _, err := os.Stat(rootfsPath); err != nil {
-		writeJSON(w, http.StatusBadRequest, apiError{Error: fmt.Sprintf("rootfsPath is not accessible: %v", err)})
-		return
-	}
 	netMode := strings.ToLower(strings.TrimSpace(req.NetMode))
 	if netMode == "" {
 		netMode = "host"
@@ -631,6 +835,18 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 		return
 	}
+	cleanupContainerDir := true
+	defer func() {
+		if cleanupContainerDir {
+			_ = os.RemoveAll(containerDir)
+		}
+	}()
+
+	rootfsPath, err := s.resolveCreateRootfs(r.Context(), req, containerDir)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
 
 	hostname := strings.TrimSpace(req.Hostname)
 	if hostname == "" {
@@ -649,6 +865,7 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	cleanupContainerDir = false
 	resp := map[string]any{"ok": true, "name": name, "configPath": configPath, "containerDir": containerDir}
 	if req.Start {
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -661,6 +878,39 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) resolveCreateRootfs(ctx context.Context, req createContainerRequest, containerDir string) (string, error) {
+	source := strings.TrimSpace(req.RootFSSource)
+	if source == "" {
+		source = "direct"
+	}
+	switch source {
+	case "direct", "local":
+		rootfsPath := strings.TrimSpace(req.RootFSPath)
+		if rootfsPath == "" || hasConfigUnsafeChars(rootfsPath) || !filepath.IsAbs(rootfsPath) {
+			return "", fmt.Errorf("rootfsPath must be an absolute path")
+		}
+		if source == "local" && !s.pathWithinManagedRoots(rootfsPath) {
+			return "", fmt.Errorf("local template path is outside managed roots")
+		}
+		return s.prepareRootfsForContainer(ctx, source, rootfsPath, containerDir)
+	case "cloud":
+		taskID := strings.TrimSpace(req.RootFSTaskID)
+		if taskID == "" {
+			return "", fmt.Errorf("rootfsTaskId is required for cloud source")
+		}
+		task, ok := s.getTask(taskID)
+		if !ok || task.Status != "done" || task.Path == "" {
+			return "", fmt.Errorf("cloud rootfs download is not ready")
+		}
+		if !s.pathWithinManagedRoots(task.Path) {
+			return "", fmt.Errorf("downloaded rootfs is outside managed roots")
+		}
+		return s.prepareRootfsForContainer(ctx, source, task.Path, containerDir)
+	default:
+		return "", fmt.Errorf("rootfsSource must be direct, local, or cloud")
+	}
 }
 
 func (s *Server) deleteContainer(w http.ResponseWriter, r *http.Request, target string) {
@@ -1023,6 +1273,360 @@ func (s *Server) containerRunning(ctx context.Context, target string) (bool, int
 		return false, 0
 	}
 	return true, int32(pid)
+}
+
+func (s *Server) newTask(kind string, name string) *taskState {
+	id := newUUID()
+	now := time.Now().Unix()
+	task := &taskState{ID: id, Kind: kind, Name: name, Status: "pending", StartedAt: now, UpdatedAt: now}
+	s.tasksMu.Lock()
+	s.tasks[id] = task
+	s.tasksMu.Unlock()
+	return cloneTask(task)
+}
+
+func (s *Server) getTask(id string) (*taskState, bool) {
+	s.tasksMu.RLock()
+	defer s.tasksMu.RUnlock()
+	task, ok := s.tasks[id]
+	if !ok {
+		return nil, false
+	}
+	return cloneTask(task), true
+}
+
+func (s *Server) updateTask(id string, fn func(*taskState)) {
+	s.tasksMu.Lock()
+	defer s.tasksMu.Unlock()
+	if task, ok := s.tasks[id]; ok {
+		fn(task)
+		task.UpdatedAt = time.Now().Unix()
+	}
+}
+
+func (s *Server) failTask(id string, err error) {
+	s.updateTask(id, func(task *taskState) {
+		task.Status = "error"
+		task.Error = err.Error()
+	})
+}
+
+func (s *Server) completeTask(id string, path string, url string) {
+	s.updateTask(id, func(task *taskState) {
+		task.Status = "done"
+		task.Path = path
+		task.URL = url
+		task.Percent = 100
+		if path != "" {
+			if info, err := os.Stat(path); err == nil {
+				task.Downloaded = info.Size()
+				if task.Total <= 0 {
+					task.Total = info.Size()
+				}
+			}
+		}
+	})
+}
+
+func cloneTask(task *taskState) *taskState {
+	if task == nil {
+		return nil
+	}
+	copy := *task
+	return &copy
+}
+
+func (s *Server) prepareRootfsForContainer(ctx context.Context, source string, rootfsPath string, containerDir string) (string, error) {
+	info, err := os.Stat(rootfsPath)
+	if err != nil {
+		return "", fmt.Errorf("rootfsPath is not accessible: %v", err)
+	}
+	lower := strings.ToLower(rootfsPath)
+	if isRootfsArchive(lower) {
+		dest := filepath.Join(containerDir, "rootfs")
+		if err := s.extractRootfsArchive(ctx, rootfsPath, dest); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	if info.IsDir() {
+		if source == "direct" {
+			return rootfsPath, nil
+		}
+		dest := filepath.Join(containerDir, "rootfs")
+		if err := s.copyRootfsDirectory(ctx, rootfsPath, dest); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	if strings.HasSuffix(lower, ".img") {
+		if source == "direct" {
+			return rootfsPath, nil
+		}
+		dest := filepath.Join(containerDir, "rootfs.img")
+		if err := s.copyRootfsFile(ctx, rootfsPath, dest); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	return "", fmt.Errorf("rootfs template must be a directory, .img, .tar.gz, .tgz, or .tar.xz")
+}
+
+func (s *Server) localRootfsItems() ([]localRootfsItem, error) {
+	roots := []string{s.templateImageRoot}
+	if s.imageRoot != "" && s.imageRoot != s.templateImageRoot {
+		roots = append(roots, s.imageRoot)
+	}
+	seen := map[string]bool{}
+	var items []localRootfsItem
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		rootItems, err := s.scanLocalRootfsDir(root, "", seen)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, rootItems...)
+		exportItems, err := s.scanLocalRootfsDir(filepath.Join(root, "exports"), "backup", seen)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, exportItems...)
+	}
+	return items, nil
+}
+
+func (s *Server) scanLocalRootfsDir(root string, kindOverride string, seen map[string]bool) ([]localRootfsItem, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var items []localRootfsItem
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") || strings.HasSuffix(entry.Name(), ".part") || entry.Name() == "exports" {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		kind := "directory"
+		if !entry.IsDir() {
+			lower := strings.ToLower(entry.Name())
+			switch {
+			case strings.HasSuffix(lower, ".img"):
+				kind = "image"
+			case isRootfsArchive(lower):
+				kind = "archive"
+			default:
+				continue
+			}
+		}
+		if kindOverride != "" && !entry.IsDir() {
+			kind = kindOverride
+		}
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		items = append(items, localRootfsItem{Name: entry.Name(), Path: path, Kind: kind, Size: info.Size(), Modified: info.ModTime().Unix()})
+	}
+	return items, nil
+}
+
+func (s *Server) createRootfsArchive(ctx context.Context, rootfsPath string, dest string, taskID string) error {
+	info, err := os.Stat(rootfsPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return s.archiveDirectory(ctx, rootfsPath, dest, taskID)
+	}
+	if strings.HasSuffix(strings.ToLower(rootfsPath), ".img") {
+		return s.archiveImage(ctx, rootfsPath, dest, taskID)
+	}
+	return fmt.Errorf("unsupported rootfs type: %s", rootfsPath)
+}
+
+func (s *Server) copyRootfsDirectory(ctx context.Context, source string, dest string) error {
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	busybox := shellQuote(s.busyboxPath())
+	cmdText := fmt.Sprintf("cd %s && %s tar -cpf - . | (cd %s && %s tar -xpf -)", shellQuote(source), busybox, shellQuote(dest), busybox)
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdText)
+	cmd.Env = s.terminalEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy rootfs template failed: %v\n%s", err, string(out))
+	}
+	return nil
+}
+
+func (s *Server) copyRootfsFile(ctx context.Context, source string, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+		return err
+	}
+	_ = os.Remove(dest)
+	cmd := exec.CommandContext(ctx, s.busyboxPath(), "cp", "-f", source, dest)
+	cmd.Env = s.terminalEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy rootfs image failed: %v\n%s", err, string(out))
+	}
+	return nil
+}
+
+func (s *Server) extractRootfsArchive(ctx context.Context, archive string, dest string) error {
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	busybox := shellQuote(s.busyboxPath())
+	archiveArg := shellQuote(archive)
+	destArg := shellQuote(dest)
+	lower := strings.ToLower(archive)
+	var cmdText string
+	switch {
+	case strings.HasSuffix(lower, ".tar.xz"):
+		cmdText = fmt.Sprintf("cd %s && %s xzcat %s | %s tar -xpf -", destArg, busybox, archiveArg, busybox)
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		cmdText = fmt.Sprintf("cd %s && %s tar -xzpf %s", destArg, busybox, archiveArg)
+	default:
+		return fmt.Errorf("unsupported rootfs archive: %s", archive)
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdText)
+	cmd.Env = s.terminalEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("extract rootfs archive failed: %v\n%s", err, string(out))
+	}
+	_ = s.applyPostExtractionFixes(ctx, dest)
+	return nil
+}
+
+func (s *Server) applyPostExtractionFixes(ctx context.Context, rootfsDir string) error {
+	if strings.TrimSpace(postExtractFixesScript) == "" {
+		return nil
+	}
+	tmpRoot := filepath.Join(s.workspace, ".webui-tmp")
+	if s.workspace == "" {
+		tmpRoot = os.TempDir()
+	}
+	if err := os.MkdirAll(tmpRoot, 0700); err != nil {
+		return err
+	}
+	scriptPath := filepath.Join(tmpRoot, "post_extract_fixes-"+newUUID()+".sh")
+	if err := os.WriteFile(scriptPath, []byte(postExtractFixesScript), 0755); err != nil {
+		return err
+	}
+	defer os.Remove(scriptPath)
+	cmd := exec.CommandContext(ctx, "sh", scriptPath, rootfsDir)
+	cmd.Env = append(s.terminalEnv(), "BUSYBOX_PATH="+s.busyboxPath())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("post extraction fixes failed: %v\n%s", err, string(out))
+	}
+	return nil
+}
+
+func isRootfsArchive(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz")
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func (s *Server) archiveDirectory(ctx context.Context, rootfsDir string, dest string, taskID string) error {
+	busybox := s.busyboxPath()
+	cmd := exec.CommandContext(ctx, busybox, "tar", "-czf", dest, "-C", rootfsDir, ".")
+	cmd.Env = s.terminalEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("archive failed: %v\n%s", err, string(out))
+	}
+	return s.verifyArchive(dest, taskID)
+}
+
+func (s *Server) archiveImage(ctx context.Context, imagePath string, dest string, taskID string) error {
+	mountDir := filepath.Join(filepath.Dir(dest), ".mount-"+taskID)
+	if err := os.MkdirAll(mountDir, 0755); err != nil {
+		return err
+	}
+	defer os.Remove(mountDir)
+	_ = exec.CommandContext(ctx, "chcon", "u:object_r:vold_data_file:s0", imagePath).Run()
+	mountOut, err := exec.CommandContext(ctx, "mount", "-t", "ext4", "-o", "loop,ro", imagePath, mountDir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mount image failed: %v\n%s", err, string(mountOut))
+	}
+	defer exec.Command("umount", "-f", mountDir).Run()
+	return s.archiveDirectory(ctx, mountDir, dest, taskID)
+}
+
+func (s *Server) verifyArchive(path string, taskID string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() <= 0 {
+		return fmt.Errorf("archive is empty")
+	}
+	s.updateTask(taskID, func(task *taskState) {
+		task.Downloaded = info.Size()
+		task.Total = info.Size()
+		task.Percent = 100
+	})
+	return nil
+}
+
+func (s *Server) busyboxPath() string {
+	if s.corePath != "" {
+		candidate := filepath.Join(s.corePath, "busybox")
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate
+		}
+	}
+	return "busybox"
+}
+
+func (s *Server) pathWithinManagedRoots(path string) bool {
+	clean := filepath.Clean(path)
+	for _, root := range []string{s.templateImageRoot, s.imageRoot, s.workspace} {
+		if root == "" {
+			continue
+		}
+		base := filepath.Clean(root)
+		if clean == base || strings.HasPrefix(clean, base+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeDownloadName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.ReplaceAll(name, " ", "-")
+	name = regexp.MustCompile(`[^a-zA-Z0-9._-]+`).ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-")
+	if name == "" {
+		return "container"
+	}
+	return name
 }
 
 func (s *Server) runDroidspaces(ctx context.Context, args ...string) (cliCommandResult, error) {

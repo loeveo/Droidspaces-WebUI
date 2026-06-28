@@ -1,0 +1,286 @@
+#!/system/bin/sh
+# Post-Extraction Fixes for Linux on Android
+# Copyright (c) 2026 ravindu644
+# Applies generic fixes after rootfs tarball extraction
+# This script runs after extraction but before unmounting
+
+set -e
+
+# Parameters
+ROOTFS_PATH="$1"
+BUSYBOX_PATH="${BUSYBOX_PATH:-/data/local/Droidspaces/bin/busybox}"
+
+# Check if BusyBox exists
+if [ ! -x "$BUSYBOX_PATH" ]; then
+    echo "[POST-FIX-ERROR] BusyBox not found or not executable at $BUSYBOX_PATH" >&2
+    exit 1
+fi
+
+# Use BusyBox applets for maximum compatibility
+BB="$BUSYBOX_PATH"
+ECHO="$BB echo"
+MKDIR="$BB mkdir"
+CAT="$BB cat"
+GREP="$BB grep"
+SED="$BB sed"
+LN="$BB ln"
+PRINTF="$BB printf"
+RM="$BB rm"
+TEST="$BB test"
+CHMOD="$BB chmod"
+CHROOT="$BB chroot"
+
+# Logging function
+log() { $ECHO "[POST-FIX] $1"; }
+warn() { $ECHO "[POST-FIX-WARN] $1" >&2; }
+
+# Check parameters
+if $TEST -z "$ROOTFS_PATH"; then
+    warn "Usage: $0 <rootfs_path>"
+    exit 1
+fi
+
+# Check if rootfs path exists
+if $TEST ! -d "$ROOTFS_PATH"; then
+    warn "Rootfs path does not exist: $ROOTFS_PATH"
+    exit 1
+fi
+
+# Helper to execute a command inside the chroot environment
+run_in_chroot() {
+    local command="$*"
+    local common_exports="export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/libexec:/opt/bin'; export TMPDIR='/tmp';"
+
+    # We use busybox chroot to run commands inside the rootfs
+    # Note: This assumes /bin/sh exists in the rootfs
+    $CHROOT "$ROOTFS_PATH" /bin/sh -c "$common_exports $command"
+}
+
+log "Starting post-extraction fixes for: $ROOTFS_PATH"
+
+# Detect NixOS
+if $TEST -d "$ROOTFS_PATH/nix"; then
+    log "NixOS detected, skipping all post-extraction fixes (Nix manages its own state)"
+    # Mark as applied anyway to prevent re-running
+    $TOUCH "$ROOTFS_PATH/etc/droidspaces" 2>/dev/null || true
+    exit 0
+fi
+
+# Pre-commit machine-id to prevent first-boot deadlock in Fedora 44
+log "Generating machine-id..."
+$CAT /proc/sys/kernel/random/uuid | $BB tr -d '-' | $BB tr -d '\n' > "$ROOTFS_PATH/etc/machine-id"
+$ECHO "" >> "$ROOTFS_PATH/etc/machine-id"
+$CHMOD 444 "$ROOTFS_PATH/etc/machine-id"
+
+# Check if fixes were already applied
+if $TEST -f "$ROOTFS_PATH/etc/droidspaces"; then
+    log "Post-extraction fixes already applied, skipping..."
+    exit 0
+fi
+
+# --- 1. General Fixes (Init-independent) ---
+
+# Android network group setup (required for socket access on Android kernels)
+log "Setting up Android network groups..."
+$GREP -q '^aid_inet:' "$ROOTFS_PATH/etc/group"    || $ECHO 'aid_inet:x:3003:'    >> "$ROOTFS_PATH/etc/group"
+$GREP -q '^aid_net_raw:' "$ROOTFS_PATH/etc/group" || $ECHO 'aid_net_raw:x:3004:' >> "$ROOTFS_PATH/etc/group"
+$GREP -q '^aid_net_admin:' "$ROOTFS_PATH/etc/group" || $ECHO 'aid_net_admin:x:3005:' >> "$ROOTFS_PATH/etc/group"
+
+# Root gets required permissions for networking, input, and display
+log "Granting root permissions for Android hardware access..."
+run_in_chroot "usermod -a -G aid_inet,aid_net_raw,input,video,tty root 2>/dev/null || true"
+
+# _apt needs aid_inet as primary group so apt works on Android
+log "Fixing _apt user group for internet access..."
+run_in_chroot "grep -q '^_apt:' /etc/passwd && usermod -g aid_inet _apt 2>/dev/null || true"
+
+# Future users created with adduser automatically get network access
+if $TEST -f "$ROOTFS_PATH/etc/adduser.conf"; then
+    log "Configuring adduser for automatic Android group assignment..."
+    $SED -i '/^EXTRA_GROUPS=/d; /^ADD_EXTRA_GROUPS=/d' "$ROOTFS_PATH/etc/adduser.conf"
+    $ECHO 'ADD_EXTRA_GROUPS=1' >> "$ROOTFS_PATH/etc/adduser.conf"
+    $ECHO 'EXTRA_GROUPS="aid_inet aid_net_raw input video tty"' >> "$ROOTFS_PATH/etc/adduser.conf"
+fi
+
+# --- 2. Systemd-Specific Fixes ---
+
+# Check if systemd is available
+if $TEST -f "$ROOTFS_PATH/usr/bin/systemctl" || $TEST -f "$ROOTFS_PATH/bin/systemctl"; then
+    GUEST_SYSTEMD_PATH="/lib/systemd/system"
+    $TEST -d "$ROOTFS_PATH/usr/lib/systemd/system" && GUEST_SYSTEMD_PATH="/usr/lib/systemd/system"
+
+    log "Systemd detected (at $GUEST_SYSTEMD_PATH), applying fixes..."
+
+    # 01. Mask problematic services for Android kernels
+    log "Masking problematic systemd services..."
+    # Mask systemd-networkd-wait-online.service
+    $LN -sf /dev/null "$ROOTFS_PATH/etc/systemd/system/systemd-networkd-wait-online.service"
+    # Mask systemd-journald-audit.socket to prevent deadlocks on Android kernels
+    $LN -sf /dev/null "$ROOTFS_PATH/etc/systemd/system/systemd-journald-audit.socket"
+
+    # Nuke problematic iptables service
+    for f in \
+        "$ROOTFS_PATH/etc/systemd/system/iptables.service" \
+        "$ROOTFS_PATH/etc/systemd/scripts/iptables" \
+        "$ROOTFS_PATH/etc/systemd/scripts/iptables.stop" \
+        "$ROOTFS_PATH/etc/systemd/system/multi-user.target.wants/iptables.service"
+    do
+        $TEST -f "$f" && $RM -f "$f"
+    done
+
+    # 02. Journald configuration (skip Audit, KMsg, etc)
+    log "Optimizing journald for Android and applying hardening..."
+    $CAT >> "$ROOTFS_PATH/etc/systemd/journald.conf" << 'EOT'
+[Journal]
+ReadKMsg=no
+Audit=no
+Storage=volatile
+EOT
+
+    $MKDIR -p "$ROOTFS_PATH/etc/systemd/journald.conf.d"
+    $CAT > "$ROOTFS_PATH/etc/systemd/journald.conf.d/ds-logging.conf" << 'EOT'
+[Journal]
+SystemMaxUse=200M
+RuntimeMaxUse=200M
+MaxRetentionSec=7day
+MaxLevelStore=info
+EOT
+
+    # 03. Enable essential services
+    log "Enabling essential systemd services..."
+    $MKDIR -p "$ROOTFS_PATH/etc/systemd/system/multi-user.target.wants"
+    for service in dbus.service systemd-udevd.service systemd-resolved.service systemd-networkd.service NetworkManager.service; do
+        if $TEST -f "$ROOTFS_PATH/$GUEST_SYSTEMD_PATH/$service"; then
+            $LN -sf "$GUEST_SYSTEMD_PATH/$service" "$ROOTFS_PATH/etc/systemd/system/multi-user.target.wants/$service"
+        fi
+    done
+
+    # 04. Disable power button handling in systemd-logind
+    log "Disabling power/suspend button handling in systemd-logind..."
+    $MKDIR -p "$ROOTFS_PATH/etc/systemd/logind.conf.d"
+    $CAT > "$ROOTFS_PATH/etc/systemd/logind.conf.d/99-power-key.conf" << 'EOF'
+[Login]
+HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandlePowerKeyLongPress=ignore
+HandlePowerKeyLongPressHibernate=ignore
+EOF
+
+    # 05. Apply udev overrides
+    log "Applying udev overrides..."
+    # 05a. Trigger override (Prevents coldplugging Android hardware)
+    OVERRIDE_DIR="$ROOTFS_PATH/etc/systemd/system/systemd-udev-trigger.service.d"
+    $MKDIR -p "$OVERRIDE_DIR"
+    $CAT > "$OVERRIDE_DIR/override.conf" << 'EOF'
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/udevadm trigger --subsystem-match=usb --subsystem-match=block --subsystem-match=input --subsystem-match=tty --subsystem-match=net
+EOF
+
+    # 05b. Read-only path overrides to prevent failures
+    for unit in systemd-udevd.service systemd-udev-trigger.service systemd-udev-settle.service systemd-udevd-kernel.socket systemd-udevd-control.socket; do
+        $MKDIR -p "$ROOTFS_PATH/etc/systemd/system/${unit}.d"
+        $PRINTF "[Unit]\nConditionPathIsReadWrite=\n" > "$ROOTFS_PATH/etc/systemd/system/${unit}.d/99-readonly-fix.conf"
+    done
+
+    # 06. Limit specific network services to NAT and gateway modes only
+    # Both need an in-container DHCP client (NAT: lease from Droidspaces; gateway:
+    # lease from the gateway container, e.g. OpenWRT). Host/none modes still skip
+    # them to prevent cellular network breakage.
+    log "Applying NAT/gateway mode guards to network services..."
+    for unit in NetworkManager.service dhcpcd.service systemd-resolved.service systemd-networkd.service; do
+        if $TEST -f "$ROOTFS_PATH/$GUEST_SYSTEMD_PATH/$unit" || $TEST -f "$ROOTFS_PATH/etc/systemd/system/multi-user.target.wants/$unit"; then
+            $MKDIR -p "$ROOTFS_PATH/etc/systemd/system/${unit}.d"
+            $CAT > "$ROOTFS_PATH/etc/systemd/system/${unit}.d/99-netmode-limit.conf" << 'EOF'
+[Service]
+ExecCondition=
+ExecCondition=/bin/sh -c "grep -qE 'net_mode=(nat|gateway)' /run/droidspaces/container.config"
+EOF
+        fi
+    done
+
+    # 07. Configure systemd-networkd for eth* interfaces
+    log "Configuring systemd network for eth* interfaces..."
+    $MKDIR -p "$ROOTFS_PATH/etc/systemd/network"
+    $CAT > "$ROOTFS_PATH/etc/systemd/network/10-eth-dhcp.network" << 'EOF'
+[Match]
+Name=eth*
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+
+[DHCPv4]
+UseDNS=yes
+UseDomains=yes
+RouteMetric=100
+EOF
+
+else
+    log "Systemd not found, skipping systemd-specific fixes"
+fi
+
+# --- 3. Alpine/OpenRC & dhcpcd-Specific Fixes ---
+
+# Replace dhcpcd init script to only start in NAT or gateway network mode
+# This is the OpenRC equivalent of systemd's ExecCondition - if the container
+# is running in host network mode, dhcpcd is cleanly skipped at boot to prevent
+# cellular network breakage and kernel panics on Android interfaces. Gateway
+# mode needs it too: the DHCP lease comes from the gateway container.
+if $TEST -f "$ROOTFS_PATH/etc/init.d/dhcpcd"; then
+    log "Alpine/OpenRC dhcpcd service detected, applying NAT/gateway mode limitation..."
+    $CAT > "$ROOTFS_PATH/etc/init.d/dhcpcd" << 'INITEOF'
+#!/sbin/openrc-run
+
+description="DHCP Client Daemon"
+
+command="/sbin/dhcpcd"
+command_args="-q -B ${command_args:-}"
+command_background="true"
+pidfile="/run/dhcpcd/pid"
+
+depend() {
+	provide net
+	need localmount
+	use logger network
+	after bootmisc modules
+	before dns
+}
+
+start_pre() {
+	# Only start in NAT or gateway mode - prevents cellular network breakage in host network mode
+	if ! grep -qE 'net_mode=(nat|gateway)' /run/droidspaces/container.config 2>/dev/null; then
+		einfo "Skipping dhcpcd: not in NAT or gateway network mode"
+		return 1
+	fi
+	checkpath -d /run/dhcpcd
+}
+INITEOF
+    $CHMOD +x "$ROOTFS_PATH/etc/init.d/dhcpcd"
+fi
+
+# Additionally whitelist only container veth interfaces (eth*) in dhcpcd.conf
+# as defense-in-depth against Android-internal interfaces (rmnet*, dit*, epdg*, etc.)
+if $TEST -f "$ROOTFS_PATH/etc/dhcpcd.conf"; then
+    log "dhcpcd.conf detected, whitelisting container eth* interfaces..."
+    if ! $GREP -q "allowinterfaces eth\*" "$ROOTFS_PATH/etc/dhcpcd.conf"; then
+        $ECHO "allowinterfaces eth*" >> "$ROOTFS_PATH/etc/dhcpcd.conf"
+    fi
+fi
+
+# --- 4. Miscellaneous Fixes ---
+
+# Configure logrotate
+log "Configuring logrotate for Android..."
+if $TEST -f "$ROOTFS_PATH/etc/logrotate.conf"; then
+    $SED -i 's/^#maxsize.*/maxsize 50M/' "$ROOTFS_PATH/etc/logrotate.conf"
+    if ! $GREP -q "maxsize 50M" "$ROOTFS_PATH/etc/logrotate.conf"; then
+        $ECHO "maxsize 50M" >> "$ROOTFS_PATH/etc/logrotate.conf"
+    fi
+fi
+
+# Mark fixes as completed
+$ECHO "Post-extraction fixes applied on $(date)" > "$ROOTFS_PATH/etc/droidspaces"
+
+log "Post-extraction fixes completed successfully"
