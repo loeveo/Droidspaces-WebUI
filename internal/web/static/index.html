@@ -2,134 +2,457 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Droidspaces WebUI</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app-layout">
-      <aside class="sidebar" aria-label="导航">
-        <div class="brand-block">
-          <h1>Droidspaces</h1>
-          <span id="backendState" class="backend-pill">未知</span>
+      <aside class="chrootc-sidebar" aria-label="主导航">
+        <div class="chrootc-sidebar-head">
+          <div class="chrootc-logo-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40" focusable="false">
+              <rect width="40" height="40" rx="12"></rect>
+              <path d="M20 10L30 15V25L20 30L10 25V15L20 10Z"></path>
+              <circle cx="20" cy="20" r="6"></circle>
+            </svg>
+          </div>
+          <div class="chrootc-logo-copy">
+            <strong>Droidspaces</strong>
+            <span>Container Manager</span>
+          </div>
         </div>
-        <nav class="nav-menu">
-          <button class="nav-item active" type="button" data-view="overview">概览</button>
-          <button class="nav-item" type="button" data-view="containers">容器列表</button>
-          <button class="nav-item" type="button" data-view="rootfs">RootFS 仓库</button>
-          <button class="nav-item" type="button" data-view="diagnostics">诊断事件</button>
+        <nav class="chrootc-nav" aria-label="桌面页面导航">
+          <button class="nav-item active" type="button" data-view="overview"><span class="nav-icon">⌁</span><span>系统资源</span></button>
+          <button class="nav-item" type="button" data-view="containers"><span class="nav-icon">▦</span><span>容器管理</span></button>
+          <button class="nav-item" type="button" data-view="rootfs"><span class="nav-icon">◇</span><span>镜像管理</span></button>
+          <button class="nav-item" type="button" data-view="network"><span class="nav-icon">⟲</span><span>网络管理</span></button>
+          <button class="nav-item" type="button" data-view="security"><span class="nav-icon">◈</span><span>安全</span></button>
+          <button class="nav-item" type="button" data-view="diagnostics"><span class="nav-icon">⌕</span><span>诊断</span></button>
+          <button class="nav-item" type="button" data-view="battery" data-battery-monitoring-nav><span class="nav-icon">▰</span><span>电池监控</span></button>
+          <button class="nav-item" type="button" data-view="settings"><span class="nav-icon">⚙</span><span>系统设置</span></button>
         </nav>
+        <div class="chrootc-sidebar-foot">
+          <button id="sidebarRefreshBtn" class="nav-item sidebar-action" type="button"><span class="nav-icon">↻</span><span>刷新数据</span></button>
+          <span id="sidebarBackendState" class="backend-pill">未知</span>
+        </div>
       </aside>
-
       <div class="content-shell">
         <header class="topbar">
-          <div>
-            <h2 id="viewTitle">概览</h2>
+          <div class="topbar-main">
+            <div class="brand-block">
+              <div>
+                <h1>Droidspaces</h1>
+                <p id="webVersionLabel" class="web-version-label" aria-live="polite" title="WebUI 读取中">WebUI 读取中</p>
+              </div>
+              <span id="backendState" class="backend-pill">未知</span>
+            </div>
+            <div>
+              <h2 id="viewTitle">概览</h2>
+              <p id="viewSubtitle" class="muted">系统、资源与网络运行状态</p>
+            </div>
           </div>
           <div class="top-actions">
-            <button id="createBtn" class="text-btn primary" type="button">新建容器</button>
+            <button id="createBtn" class="text-btn primary" type="button" title="新建容器" aria-label="新建容器">新建容器</button>
+            <button id="taskStatusBtn" class="text-btn" type="button" title="查看后台任务总体状况" aria-label="查看后台任务总体状况" aria-controls="taskOverviewFloat" aria-expanded="false">后台任务</button>
+            <button id="taskOutputBtn" class="text-btn" type="button" aria-controls="taskFloat" aria-expanded="false">任务输出</button>
             <button id="refreshBtn" class="icon-btn primary" title="刷新" aria-label="刷新">↻</button>
+            <div class="menu-wrapper">
+              <button id="menuToggle" class="icon-btn menu-toggle" type="button" title="切换页面" aria-label="切换页面" aria-expanded="false" aria-controls="menuPanel">☰</button>
+              <div id="menuPanel" class="nav-popover hidden">
+                <nav class="nav-menu" aria-label="页面导航">
+                  <button class="nav-item active" type="button" data-view="overview"><span class="nav-icon">⌁</span><span>系统资源</span></button>
+                  <button class="nav-item" type="button" data-view="containers"><span class="nav-icon">▦</span><span>容器管理</span></button>
+                  <button class="nav-item" type="button" data-view="rootfs"><span class="nav-icon">◇</span><span>镜像管理</span></button>
+                  <button class="nav-item" type="button" data-view="network"><span class="nav-icon">⟲</span><span>网络管理</span></button>
+                  <button class="nav-item" type="button" data-view="security"><span class="nav-icon">◈</span><span>安全</span></button>
+                  <button class="nav-item" type="button" data-view="diagnostics"><span class="nav-icon">⌕</span><span>诊断</span></button>
+                  <button class="nav-item" type="button" data-view="battery" data-battery-monitoring-nav><span class="nav-icon">▰</span><span>电池监控</span></button>
+                  <button class="nav-item" type="button" data-view="settings"><span class="nav-icon">⚙</span><span>系统设置</span></button>
+                </nav>
+              </div>
+            </div>
           </div>
         </header>
 
         <main class="view-stack">
           <section id="overviewView" class="view-panel active" aria-label="概览">
-            <section class="panel status-panel" aria-label="状态">
-              <div class="metric"><span class="metric-label">总数</span><strong id="totalContainers">0</strong></div>
-              <div class="metric"><span class="metric-label">运行</span><strong id="runningContainers">0</strong></div>
-              <div class="metric"><span class="metric-label">停止</span><strong id="stoppedContainers">0</strong></div>
-              <div class="metric"><span class="metric-label">模板</span><strong id="localRootfsCount">0</strong></div>
+            <section class="metric-grid device-metrics" aria-label="运行设备参数">
+              <div class="metric"><span class="metric-label">系统版本</span><strong id="systemVersion">未知</strong></div>
+              <div class="metric"><span class="metric-label">内核版本</span><strong id="kernelVersion">未知</strong></div>
+              <div class="metric"><span class="metric-label">设备运行时间</span><strong id="deviceUptime">待上报</strong></div>
+              <div class="metric resource-metric cpu-metric">
+                <div class="resource-metric-head"><span class="metric-label">CPU 占用</span><strong id="cpuUsage">待上报</strong></div>
+                <div id="cpuUsageMeter" class="resource-usage-meter unknown" role="progressbar" aria-label="CPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuetext="CPU 使用率待上报"><span></span></div>
+                <span id="cpuUsageDetail" class="resource-metric-detail">主机整体使用率</span>
+              </div>
+              <div class="metric resource-metric memory-metric">
+                <div class="resource-metric-head"><span class="metric-label">内存占用</span><strong id="memoryUsage">待上报</strong></div>
+                <div id="memoryUsageMeter" class="resource-usage-meter unknown" role="progressbar" aria-label="内存使用率" aria-valuemin="0" aria-valuemax="100" aria-valuetext="内存使用率待上报"><span></span></div>
+                <span id="memoryUsageDetail" class="resource-metric-detail">已用 / 总量待上报</span>
+              </div>
+              <div class="metric"><span class="metric-label">网卡流量 / 累计流量</span><strong id="networkIO">待上报</strong></div>
+              <div id="overviewPowerMetric" class="metric battery-metric"><span id="overviewPowerLabel" class="metric-label">当前功耗</span><strong><span id="batteryMain">待上报</span><span id="batteryDetail" hidden></span></strong></div>
+            </section>
+            <section class="overview-container-summary" aria-label="容器与任务摘要">
+              <div class="overview-container-summary-head">
+                <div class="overview-container-primary"><span class="metric-label">容器运行状态</span><strong><span id="runningContainers">0</span><small>运行中</small></strong></div>
+                <div class="overview-container-counts">
+                  <span><strong id="totalContainers">0</strong><small>容器总数</small></span>
+                  <span><strong id="stoppedContainers">0</strong><small>已停止</small></span>
+                  <span><strong id="localRootfsCount">0</strong><small>本地镜像</small></span>
+                  <span><strong id="activeTaskCount">0</strong><small>活跃任务</small></span>
+                </div>
+                <button class="text-btn" type="button" data-view="containers">查看容器</button>
+              </div>
+              <div id="overviewContainerList" class="overview-container-list"><div class="empty-state">容器信息加载中</div></div>
+            </section>
+            <section class="dashboard-grid overview-dashboard">
+              <section class="panel"><div class="panel-head"><h2>主机摘要</h2></div><div id="hostSummary" class="summary-list"></div></section>
+              <section class="panel"><div class="panel-head"><h2>最近事件</h2><button class="text-btn" type="button" data-view="diagnostics">事件日志</button></div><div id="overviewEvents" class="events-list compact"></div></section>
             </section>
           </section>
 
           <section id="containersView" class="view-panel" aria-label="容器列表">
             <section class="panel containers-panel">
               <div class="panel-head split-head">
-                <h2>容器列表</h2>
+                <div><h2>容器列表</h2><p id="containerListHint" class="muted">运行中</p></div>
                 <div class="filter-row">
-                  <select id="containerStateFilter" class="select-input" aria-label="状态筛选">
-                    <option value="all">全部</option>
-                    <option value="running">运行中</option>
-                    <option value="stopped">未运行</option>
-                  </select>
-                  <input id="filterInput" type="search" placeholder="筛选名称、网络" />
+                  <div class="segmented-filter" role="group" aria-label="容器状态筛选">
+                    <button class="segmented-option active" type="button" data-container-filter="running">运行中</button>
+                    <button class="segmented-option" type="button" data-container-filter="stopped">未启动</button>
+                    <button class="segmented-option" type="button" data-container-filter="all">全部</button>
+                  </div>
+                  <button id="bootPriorityBtn" class="text-btn" type="button">启动顺序</button>
+                  <input id="filterInput" type="search" placeholder="搜索名称、主机名、网络" />
                 </div>
               </div>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr><th>名称</th><th>状态</th><th>PID</th><th>网络</th><th class="actions-col">操作</th></tr>
-                  </thead>
-                  <tbody id="containerRows"><tr><td colspan="5" class="empty">加载中</td></tr></tbody>
-                </table>
+              <div id="containerRows" class="container-card-grid"><div class="empty-state">加载中</div></div>
+            </section>
+          </section>
+
+          <section id="detailView" class="view-panel" aria-label="容器详细参数">
+            <section class="panel detail-panel">
+              <div class="panel-head split-head">
+                <div><h2 id="detailTitle">详细参数</h2><p id="detailSubtitle" class="muted">从容器列表选择一个容器</p></div>
+                <div class="tool-buttons"><button id="detailTerminalBtn" class="text-btn" type="button">打开终端</button><button id="detailRefreshBtn" class="icon-btn" type="button" title="刷新详情" aria-label="刷新详情">↻</button></div>
               </div>
+              <div id="detailBody" class="detail-body"><div class="empty-state">尚未选择容器</div></div>
             </section>
+          </section>
 
-            <section id="detailPanel" class="panel detail-panel hidden" aria-label="详情">
-              <div class="panel-head"><h2 id="detailTitle">详情</h2><button id="closeDetailBtn" class="icon-btn" title="关闭" aria-label="关闭">×</button></div>
-              <div id="detailBody" class="detail-body"></div>
-            </section>
-
-            <section id="terminalPanel" class="panel terminal-panel hidden" aria-label="终端">
-              <div class="panel-head">
-                <h2>终端</h2>
-                <div class="terminal-target"><select id="terminalTarget" class="select-input" aria-label="容器"></select><input id="terminalUser" class="small-input" type="text" value="root" aria-label="用户" /></div>
+          <section id="terminalView" class="view-panel" aria-label="交互终端">
+            <section class="panel terminal-panel">
+              <div class="panel-head split-head">
+                <div><h2>交互终端</h2><p class="muted">连接 Droidspaces enter 会话</p></div>
+                <div class="terminal-target"><select id="terminalTarget" class="select-input" aria-label="容器"></select><select id="terminalUserSelect" class="select-input" aria-label="用户"></select><input id="terminalUser" class="small-input" type="text" value="root" aria-label="手动用户" /></div>
               </div>
               <div class="terminal-body">
-                <div class="terminal-actions"><span id="terminalStatus" class="terminal-status">未连接</span><button id="terminalConnectBtn" class="text-btn primary" type="button">连接 shell</button><button id="terminalDisconnectBtn" class="text-btn" type="button" disabled>断开</button><button id="terminalClearBtn" class="text-btn" type="button">清空</button></div>
-                <div id="terminalScreen" class="terminal-screen" tabindex="0">选择正在运行的容器后连接 shell</div>
-                <div class="terminal-input-row"><textarea id="terminalInput" class="terminal-input" rows="2" spellcheck="false" placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea><button id="terminalSendBtn" class="text-btn primary" type="button">发送</button></div>
+                <div class="terminal-actions"><span id="terminalStatus" class="terminal-status">未连接</span><button id="terminalConnectBtn" class="text-btn primary" type="button">连接</button><button id="terminalDisconnectBtn" class="text-btn" type="button" disabled>断开</button><button id="terminalClearBtn" class="text-btn" type="button">清屏</button></div>
+                <pre id="terminalScreen" class="terminal-screen" tabindex="0">选择正在运行的容器后连接 shell</pre>
+                <div class="terminal-input-row"><textarea id="terminalInput" class="terminal-input" rows="2" spellcheck="false" placeholder="移动端输入区：Enter 发送，Shift+Enter 换行"></textarea><button id="terminalSendBtn" class="text-btn primary" type="button">发送</button></div>
               </div>
             </section>
           </section>
 
-          <section id="rootfsView" class="view-panel" aria-label="RootFS 仓库">
+          <section id="rootfsView" class="view-panel" aria-label="镜像管理">
             <section class="panel rootfs-panel">
-              <div class="panel-head split-head">
-                <h2>RootFS 管理</h2>
-                <div class="tool-buttons"><select id="rootfsArch" class="select-input" aria-label="架构"><option value="">自动</option><option value="aarch64">aarch64</option><option value="armhf">armhf</option><option value="x86_64">x86_64</option><option value="x86">x86</option></select><button id="rootfsRefreshBtn" class="icon-btn" title="刷新 RootFS 列表" aria-label="刷新 RootFS 列表">↻</button></div>
+              <div class="panel-head rootfs-panel-head">
+                <h2>镜像管理</h2>
+                <div class="tool-buttons"><select id="rootfsArch" class="select-input" aria-label="架构"><option value="">自动</option><option value="aarch64">aarch64</option><option value="armhf">armhf</option><option value="x86_64">x86_64</option><option value="x86">x86</option></select><button id="rootfsRefreshBtn" class="icon-btn" title="刷新镜像列表" aria-label="刷新镜像列表">↻</button></div>
               </div>
-              <div class="rootfs-columns">
-                <div><h3>云端列表</h3><div id="rootfsList" class="rootfs-list"><div class="empty-state">等待刷新</div></div></div>
-                <div><h3>本地模板</h3><div id="localRootfsList" class="rootfs-list compact"><div class="empty-state">加载中</div></div></div>
+              <div class="rootfs-tabs" role="tablist" aria-label="镜像功能">
+                <button class="segmented-option active" type="button" data-rootfs-tab="local" role="tab" aria-selected="true">本地模板</button>
+                <button class="segmented-option" type="button" data-rootfs-tab="backups" role="tab" aria-selected="false">备份</button>
+                <button class="segmented-option" type="button" data-rootfs-tab="remote" role="tab" aria-selected="false">云端镜像</button>
               </div>
-              <div id="taskList" class="task-list"></div>
+              <section id="rootfsLocalPanel" class="rootfs-tab-panel active" role="tabpanel">
+                <div class="upload-strip"><input id="rootfsUploadFile" type="file" accept=".img,.tar.gz,.tgz,.tar.xz" /><button id="rootfsUploadBtn" class="text-btn primary" type="button">上传模板</button></div>
+                <div id="localRootfsList" class="rootfs-list"><div class="empty-state">加载中</div></div>
+              </section>
+              <section id="rootfsBackupsPanel" class="rootfs-tab-panel" role="tabpanel">
+                <div id="backupRootfsList" class="rootfs-list"><div class="empty-state">暂无备份</div></div>
+              </section>
+              <section id="rootfsRemotePanel" class="rootfs-tab-panel" role="tabpanel">
+                <div class="rootfs-remote-toolbar"><label class="rootfs-remote-search"><span class="sr-only">快速搜索云端镜像</span><input id="rootfsRemoteSearch" type="search" placeholder="快速搜索云端镜像：系统或版本" aria-label="快速搜索云端镜像" autocomplete="off" /></label><select id="rootfsSourceFilter" class="select-input" aria-label="按来源筛选镜像"><option value="">全部镜像</option></select><button id="repoManageBtn" class="text-btn" type="button" title="管理云端来源" aria-label="管理云端来源" aria-expanded="false" aria-controls="repoEditorPanel">管理来源</button></div>
+                <div id="repoEditorPanel" class="repo-editor hidden"><div class="repo-editor-head"><strong>云端来源</strong><button id="repoEditorCloseBtn" class="icon-btn" type="button" title="关闭来源管理" aria-label="关闭来源管理">×</button></div><div id="repoRows" class="repo-rows"></div><div class="repo-editor-actions"><button id="repoAddBtn" class="text-btn" type="button">新增仓库</button><button id="repoSaveBtn" class="text-btn primary" type="button">保存仓库</button></div></div>
+                <div id="rootfsList" class="rootfs-list"><div class="empty-state">等待刷新</div></div>
+              </section>
             </section>
           </section>
 
-          <section id="diagnosticsView" class="view-panel" aria-label="诊断事件">
-            <section class="panel tools-panel"><div class="panel-head"><h2>诊断</h2><div class="tool-buttons"><button class="text-btn" data-cli="mode">mode</button><button class="text-btn" data-cli="scan">scan</button><button class="text-btn" data-cli="show-format">show</button><button class="text-btn" data-cli="version">version</button></div></div><pre id="cliOutput" class="output">等待执行</pre></section>
+
+          <section id="networkView" class="view-panel" aria-label="网络管理">
+            <section class="metric-grid compact" id="networkSummary"></section>
+          <section class="panel"><div class="panel-head split-head"><div><h2>NAT 默认配置</h2><p class="muted">出口由官方核心按当前运行平台自动检测</p></div></div><div class="form-grid settings-grid"><label><span>NAT 默认前缀</span><input id="defaultNatCIDR" type="text" value="172.28.1.x" readonly /></label><label><span>NAT 网关</span><input id="natGatewayIP" type="text" value="172.28.0.1" readonly /></label><label class="wide"><span>上游出口</span><input id="natUpstreamMode" type="text" value="自动检测默认路由" readonly /></label></div></section>
+            <section class="panel"><div class="panel-head"><h2>端口与网络模式</h2></div><div class="table-wrap"><table><thead><tr><th>容器</th><th>状态</th><th>模式</th><th>NAT/IP</th><th>端口转发</th><th>DNS</th></tr></thead><tbody id="networkRows"><tr><td colspan="6" class="empty">加载中</td></tr></tbody></table></div></section>
+          </section>
+
+          <section id="securityView" class="view-panel" aria-label="安全">
+            <section class="panel"><div class="panel-head"><h2>安全摘要</h2></div><div id="securitySummary" class="summary-list"></div></section>
+            <section class="panel"><div class="panel-head"><h2>风险发现</h2></div><div id="securityFindings" class="finding-list"></div></section>
+          </section>
+
+          <section id="diagnosticsView" class="view-panel" aria-label="诊断">
+            <section class="panel"><div class="panel-head split-head"><div><h2>后端状态</h2><p class="muted">socketd 连接、兜底来源和最近后端错误</p></div><button id="backendDiagnosticsRefreshBtn" class="icon-btn" type="button" title="刷新后端状态" aria-label="刷新后端状态">↻</button></div><div id="backendDiagnostics" class="summary-list"></div><pre id="backendErrorLog" class="mini-output backend-error-log">暂无后端错误</pre></section>
+            <section class="panel webui-log-panel"><div class="panel-head split-head"><div><h2>WebUI 服务日志</h2><p id="webuiLogMeta" class="muted" aria-live="polite">等待读取</p></div><div class="tool-buttons webui-log-controls"><label class="webui-log-tail"><span>末尾</span><select id="webuiLogTail" class="select-input" aria-label="读取末尾日志行数"><option value="100">100 行</option><option value="250" selected>250 行</option><option value="500">500 行</option><option value="1000">1000 行</option></select></label><label class="webui-log-follow" title="仅在诊断页可见时自动刷新"><input id="webuiLogFollow" type="checkbox" checked /><span>自动跟随</span></label><button id="webuiLogRefreshBtn" class="icon-btn" type="button" title="刷新 WebUI 服务日志" aria-label="刷新 WebUI 服务日志">↻</button></div></div><pre id="webuiLogOutput" class="output webui-log-output" tabindex="0" aria-live="off">等待读取 WebUI 服务日志</pre></section>
+            <section class="panel"><div class="panel-head"><h2>主机与路径</h2><button id="hostRefreshBtn" class="icon-btn" type="button" title="刷新主机摘要" aria-label="刷新主机摘要">↻</button></div><div id="hostPathList" class="path-list"></div></section>
+            <section class="panel tools-panel"><div class="panel-head split-head"><h2>Requirements</h2><div class="tool-buttons"><button class="text-btn" data-diagnostics-action="requirements">检查</button><button class="text-btn" data-diagnostics-action="bugreport">Bugreport</button><button class="text-btn" data-diagnostics-action="settings">设置</button></div></div><div id="diagnosticsOutput" class="output diagnostics-output">等待执行</div></section>
+            <section class="panel tools-panel"><div class="panel-head split-head"><h2>CLI 诊断</h2><div class="tool-buttons"><button class="text-btn" data-cli="mode">mode</button><button class="text-btn" data-cli="scan">scan</button><button class="text-btn" data-cli="show-format">show</button><button class="text-btn" data-cli="version">version</button></div></div><pre id="cliOutput" class="output">等待执行</pre></section>
             <section class="panel events-panel"><div class="panel-head"><h2>事件</h2><button id="eventsBtn" class="icon-btn" title="刷新事件" aria-label="刷新事件">↻</button></div><div id="eventsList" class="events-list"></div></section>
+          </section>
+
+          <section id="settingsView" class="view-panel" aria-label="系统设置">
+            <section class="panel settings-panel">
+              <div class="panel-head split-head">
+                <div><h2>系统设置</h2><p class="muted">WebUI 运行配置、路径、镜像仓库与 Android 集成开关</p></div>
+                <button id="settingsSaveBtn" class="text-btn primary" type="button">保存设置</button>
+              </div>
+              <div id="settingsStatus" class="settings-status muted">读取配置中</div>
+              <div class="settings-section-grid">
+                <section class="settings-card">
+                  <h3>WebUI 运行</h3>
+                  <div class="form-grid settings-grid">
+                    <label><span>监听模式</span><select id="settingsMode" class="select-input"><option value="local">local</option><option value="public">public</option></select></label>
+                    <label><span>监听地址</span><input id="settingsHost" type="text" placeholder="127.0.0.1" /></label>
+                    <label><span>监听端口</span><input id="settingsPort" type="number" min="1" max="65535" step="1" /></label>
+                    <label><span>概览刷新间隔（秒）</span><input id="settingsOverviewRefreshSeconds" type="number" min="1" max="60" step="1" /></label>
+                    <label class="check wide"><input id="settingsOverviewPowerEnabled" type="checkbox" /><span>首页显示当前功耗</span></label>
+                    <label class="check wide"><input id="settingsBatteryMonitoringEnabled" type="checkbox" /><span>启用电池监控</span></label>
+                    <label><span>电池统计采样间隔（秒）</span><input id="settingsBatteryStatsSampleSeconds" type="number" min="1" max="60" step="1" /></label>
+                    <label><span>电池统计写入间隔（分钟）</span><input id="settingsBatteryStatsWriteMinutes" type="number" min="5" max="1440" step="1" /></label>
+                    <label><span>电池串联结构</span><select id="settingsBatterySeriesCells" class="select-input"><option value="0">自动识别</option><option value="1">1S 单节/单块</option><option value="2">2S 双串</option><option value="3">3S 三串</option><option value="4">4S 四串</option><option value="5">5S 五串</option><option value="6">6S 六串</option></select></label>
+                    <label><span>授权 Token</span><input id="settingsAuthToken" type="password" autocomplete="new-password" placeholder="public 模式必须填写" /></label>
+                    <label class="check"><input id="settingsSocketdEnabled" type="checkbox" /><span>启用 socketd 后端</span></label>
+                    <label class="check"><input id="settingsRootfsSkipTLSVerify" type="checkbox" /><span>镜像下载跳过 TLS 校验</span></label>
+                    <label class="check wide"><input id="settingsBatteryDirectPower" type="checkbox" /><span>设备支持直供电/旁路供电</span></label>
+                  </div>
+                </section>
+                <section class="settings-card">
+                  <h3>路径配置</h3>
+                  <div class="form-grid settings-grid">
+                    <label class="wide"><span>Droidspaces 二进制</span><input id="settingsDroidspacesPath" type="text" /></label>
+                    <label><span>核心目录</span><input id="settingsCorePath" type="text" /></label>
+                    <label><span>容器镜像目录</span><input id="settingsImageRoot" type="text" /></label>
+                    <label><span>模板镜像目录</span><input id="settingsTemplateImageRoot" type="text" /></label>
+                    <label><span>工作区</span><input id="settingsWorkspace" type="text" /></label>
+                    <label><span>配置文件</span><input id="settingsConfigPath" type="text" readonly /></label>
+                  </div>
+                </section>
+                <section class="settings-card">
+                  <h3>NAT 默认配置</h3>
+                  <div class="form-grid settings-grid">
+                    <label><span>NAT 第 3 位</span><input id="settingsDefaultNatThirdOctet" type="number" min="1" max="254" step="1" inputmode="numeric" /></label>
+                    <label><span>NAT 默认前缀</span><input id="settingsDefaultNatCIDR" type="text" value="172.28.1.x" readonly /></label>
+                    <label><span>NAT 网关</span><input id="settingsNatGatewayIP" type="text" value="172.28.0.1" readonly /></label>
+                    <label class="wide"><span>上游出口</span><input id="settingsNatUpstreamMode" type="text" value="自动检测默认路由" readonly /></label>
+					<label class="check wide"><input id="settingsNestedAndroidNatCompat" type="checkbox" /><span>嵌套 Android NAT 路由兼容（仅在 Linux 容器中运行 WebUI 时启用；不修改防火墙）</span></label>
+                  </div>
+                </section>
+                <section class="settings-card">
+                  <h3>Android 集成</h3>
+                  <div class="form-grid settings-grid">
+                    <label class="check"><input id="settingsDaemonMode" type="checkbox" data-diag-toggle="daemonMode" /><span>Daemon mode</span></label>
+                    <label class="check"><input id="settingsSymlinkEnabled" type="checkbox" data-diag-toggle="symlinkEnabled" /><span>system/bin 软链接</span></label>
+                  </div>
+                  <div id="settingsIntegrationStatus" class="mini-output settings-integration-status">等待状态</div>
+                </section>
+                <section class="settings-card wide">
+                  <div class="section-line core-update-head"><div><h3>核心程序更新</h3><p class="muted">Droidspaces 官方 GitHub Release</p></div><div class="tool-buttons"><button id="coreUpdateCheckBtn" class="icon-btn" type="button" title="检查核心更新" aria-label="检查核心更新">↻</button><button id="coreUpdateBtn" class="text-btn primary" type="button">下载并更新</button></div></div>
+                  <div id="coreUpdateStatus" class="summary-list settings-core-update-status" aria-live="polite">尚未检查更新</div>
+                </section>
+                <section class="settings-card wide">
+                  <div class="section-line"><h3>云端镜像仓库</h3><div class="tool-buttons"><button id="settingsRepoAddBtn" class="text-btn" type="button">新增仓库</button></div></div>
+                  <div class="settings-repo-preset" aria-label="Linux Containers 中国大陆加速源">
+                    <div class="settings-repo-preset-copy"><strong>Linux Containers CN 加速</strong><span>启用后将现有 Linux Containers RootFS 下载地址切换到南京大学镜像站。</span></div>
+                    <div class="settings-repo-preset-action"><label class="settings-repo-preset-toggle"><input id="settingsNjuMirrorEnabled" type="checkbox" aria-describedby="settingsNjuMirrorRepoStatus" /><span>启用 CN 加速</span></label><span id="settingsNjuMirrorRepoStatus" class="badge" aria-live="polite"></span></div>
+                  </div>
+                  <div id="settingsRepoRows" class="repo-rows settings-repo-rows"></div>
+                </section>
+              </div>
+            </section>
+          </section>
+          <section id="batteryView" class="view-panel" aria-label="电池监控">
+            <section class="panel settings-panel">
+              <div class="panel-head split-head">
+                <div><h2>电池监控</h2><p class="muted">实时充放电状态、库仑计历史和外部输入功率统计</p></div>
+                <div class="tool-buttons"><select id="batteryPowerHours" class="select-input"><option value="1">最近 1 小时</option><option value="6">最近 6 小时</option><option value="24" selected>最近 24 小时</option><option value="72">最近 72 小时</option><option value="168">最近 7 天</option></select><button id="batteryPowerRefreshBtn" class="text-btn" type="button">刷新</button></div>
+              </div>
+              <div id="batteryLiveOverview" class="battery-live-overview" aria-live="polite"></div>
+              <div id="batteryPowerSummary" class="metric-grid compact"></div>
+              <div class="settings-section-grid">
+                <section class="settings-card"><h3>电池放电功率区间（仅放电）</h3><div id="batteryPowerBins" class="power-bin-list"></div></section>
+                <section class="settings-card"><h3>外部输入功率区间</h3><div id="inputPowerBins" class="power-bin-list"></div></section>
+                <section class="settings-card wide"><h3>功率曲线</h3><div id="batteryPowerChart" class="power-chart"></div></section>
+              </div>
+            </section>
           </section>
         </main>
       </div>
+      <nav class="mobile-navbar" aria-label="移动端页面导航">
+        <button class="nav-item active" type="button" data-view="overview"><span class="nav-icon">⌁</span><span>资源</span></button>
+        <button class="nav-item" type="button" data-view="containers"><span class="nav-icon">▦</span><span>容器</span></button>
+        <button class="nav-item" type="button" data-view="rootfs"><span class="nav-icon">◇</span><span>镜像</span></button>
+        <button class="nav-item" type="button" data-view="diagnostics"><span class="nav-icon">⌕</span><span>诊断</span></button>
+        <button class="nav-item" type="button" data-view="settings"><span class="nav-icon">⚙</span><span>设置</span></button>
+      </nav>
     </div>
 
     <div id="createModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="createTitle">
-      <form id="createForm" class="modal-box create-box">
-        <div class="modal-head"><h2 id="createTitle">新建容器</h2><button id="createCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button></div>
-        <div class="source-tabs" role="tablist" aria-label="RootFS 来源"><label><input type="radio" name="createSource" value="local" checked />本地模板</label><label><input type="radio" name="createSource" value="cloud" />云端仓库</label><label><input type="radio" name="createSource" value="direct" />直接指定</label></div>
+      <form id="createForm" class="modal-box create-box" novalidate>
+        <div class="modal-head"><div><h2 id="createTitle">新建容器</h2><p id="createVersionHint" class="runtime-version-hint">WebUI: 读取中 · 当前核心: 读取中 · 适配核心: 读取中</p></div><button id="createCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button></div>
+        <div class="create-modal-body">
+          <section id="createTemplatePicker" class="template-picker" aria-labelledby="createTemplatePickerTitle">
+          <div class="template-picker-head">
+            <div><span class="template-picker-eyebrow">系统模板</span><h3 id="createTemplatePickerTitle">选择容器系统</h3></div>
+            <span id="createTemplatePickerCount" class="template-picker-count" aria-live="polite"></span>
+          </div>
+          <div class="source-tabs template-source-tabs" role="radiogroup" aria-label="镜像来源"><label><input type="radio" name="createSource" value="local" checked />本地模板</label><label><input type="radio" name="createSource" value="cloud" />云端仓库</label></div>
+          <div id="createTemplateSelection" class="template-picker-selection" aria-live="polite"></div>
+          <section id="localSourceField" class="template-source-panel" aria-label="本地模板选择器">
+            <select id="createLocalRootfs" class="template-picker-native" tabindex="-1" aria-hidden="true"></select>
+            <div class="template-picker-toolbar"><label class="template-picker-search"><span class="sr-only">搜索本地模板</span><input id="createLocalRootfsSearch" type="search" placeholder="搜索系统或版本" autocomplete="off" /></label></div>
+            <div id="createLocalRootfsList" class="template-picker-results" role="group" aria-label="本地模板列表"></div>
+          </section>
+          <section id="cloudSourceField" class="template-source-panel hidden" aria-label="云端镜像选择器">
+            <select id="createCloudRootfs" class="template-picker-native" tabindex="-1" aria-hidden="true"></select>
+            <div class="template-picker-toolbar cloud-template-picker-toolbar"><label class="template-picker-search"><span class="sr-only">快速搜索云端镜像</span><input id="createCloudRootfsSearch" type="search" placeholder="快速搜索云端镜像：系统或版本" aria-label="快速搜索云端镜像" autocomplete="off" /></label><select id="createCloudSourceFilter" class="select-input" aria-label="按云端来源筛选镜像"><option value="">全部来源</option></select><button id="createCloudPickerRefreshBtn" class="icon-btn" type="button" title="刷新云端镜像" aria-label="刷新云端镜像">↻</button></div>
+            <div id="createCloudRootfsList" class="template-picker-results" role="group" aria-label="云端镜像列表"></div>
+            <div class="template-picker-cloud-actions"><span id="createCloudSourceHint" class="field-desc">来源：等待选择</span><button id="createCloudDownloadBtn" class="text-btn" type="button">预下载到本地</button></div>
+            <div id="createCloudTask" class="inline-progress" role="status" aria-live="polite">选择镜像后直接创建，后台会下载并继续创建容器。</div>
+          </section>
+          <div class="form-grid create-identity-fields">
+            <label><span>名称</span><input id="createName" type="text" required maxlength="255" placeholder="Ubuntu24" /></label>
+            <label><span>主机名</span><input id="createHostname" type="text" maxlength="255" placeholder="默认同名称" /></label>
+          </div>
+          <section id="createCloudInitField" class="cloud-init-panel hidden" aria-labelledby="createCloudInitTitle">
+            <div class="cloud-init-head">
+              <div><span class="template-picker-eyebrow">cloud-init</span><h3 id="createCloudInitTitle">云镜像初始化</h3><p>使用 NoCloud 种子在首次启动时应用主机名、用户数据和可选网络定义。</p></div>
+              <label class="cloud-init-toggle"><input id="createCloudInitEnabled" type="checkbox" checked /><span>启用初始化配置</span></label>
+            </div>
+            <div id="createCloudInitSettings" class="cloud-init-settings hidden">
+              <section class="cloud-init-user-data" aria-labelledby="createCloudInitUserDataTitle">
+                <div class="cloud-init-user-data-head">
+                  <div><h4 id="createCloudInitUserDataTitle">首次启动配置</h4><p id="createCloudInitUserDataSummary" class="field-desc">未设置额外用户数据，将使用容器主机名完成初始化。</p></div>
+                  <div class="source-tabs cloud-init-mode-tabs" role="radiogroup" aria-label="用户数据配置方式"><label><input type="radio" name="createCloudInitUserDataMode" value="guided" checked />引导配置</label><label><input type="radio" name="createCloudInitUserDataMode" value="advanced" />高级 YAML</label></div>
+                </div>
+                <div id="createCloudInitGuidedSettings" class="cloud-init-guided-settings">
+                  <label><span>初始化用户名</span><input id="createCloudInitUsername" type="text" maxlength="32" autocomplete="username" value="root" placeholder="root 或新用户名" /></label>
+                  <label><span>登录密码</span><span class="cloud-init-password-row"><input id="createCloudInitPassword" type="password" maxlength="256" autocomplete="new-password" /><button id="createCloudInitPasswordVisibility" class="icon-btn" type="button" title="显示密码" aria-label="显示密码" aria-pressed="false">&#128065;</button><button id="createCloudInitPasswordRegenerate" class="icon-btn" type="button" title="重新生成 8 位随机密码" aria-label="重新生成 8 位随机密码">&#8635;</button></span></label>
+                  <label class="cloud-init-check"><input id="createCloudInitSudo" type="checkbox" checked /><span>授予免密 sudo</span></label>
+                  <div class="cloud-init-ssh-settings wide">
+                    <label class="cloud-init-check"><input id="createCloudInitSSHEnabled" type="checkbox" aria-controls="createCloudInitSSHPortField" aria-expanded="false" /><span>开启 SSH 远程管理</span></label>
+                    <label id="createCloudInitSSHPortField" class="cloud-init-ssh-port hidden"><span>SSH 远程访问端口</span><input id="createCloudInitSSHPort" type="number" min="1" max="65535" step="1" inputmode="numeric" value="22" disabled aria-describedby="createCloudInitSSHPortHint" /><small id="createCloudInitSSHPortHint" class="field-desc">容器内部 SSH 服务端口，范围 1-65535。</small></label>
+                    <label class="cloud-init-check cloud-init-root-ssh"><input id="createCloudInitRootSSH" type="checkbox" aria-describedby="createCloudInitRootSSHHint" /><span>开启 root 用户 SSH 远程管理</span><small id="createCloudInitRootSSHHint" class="field-desc">自动开启 SSH 远程管理，并允许 root 用户通过 SSH 密码登录。</small></label>
+                  </div>
+                  <label class="wide"><span>SSH 公钥</span><textarea id="createCloudInitSSHKeys" class="form-textarea" rows="3" spellcheck="false" placeholder="每行一条公钥"></textarea></label>
+                  <label class="wide"><span>安装软件包</span><input id="createCloudInitPackages" type="text" autocomplete="off" placeholder="curl, git, htop" /></label>
+                  <label class="wide"><span>首次启动命令</span><textarea id="createCloudInitCommands" class="form-textarea" rows="3" spellcheck="false" placeholder="每行一条命令"></textarea></label>
+                </div>
+                <label id="createCloudInitAdvancedField" class="cloud-init-advanced-field hidden"><span>用户数据 YAML</span><textarea id="createCloudInitUserData" class="form-textarea" rows="9" spellcheck="false" placeholder="#cloud-config&#10;packages:&#10;  - curl"></textarea></label>
+              </section>
+              <label><span>网络定义 YAML（可选）</span><textarea id="createCloudInitNetworkConfig" class="form-textarea" rows="4" spellcheck="false" placeholder="version: 2&#10;ethernets:&#10;  eth0: { dhcp4: true }"></textarea></label>
+            </div>
+          </section>
+          </section>
         <div class="form-grid">
-          <label><span>名称</span><input id="createName" type="text" required placeholder="Ubuntu24.04" /></label>
-          <label><span>主机名</span><input id="createHostname" type="text" placeholder="默认同名称" /></label>
-          <label id="localSourceField" class="wide"><span>本地模板镜像</span><select id="createLocalRootfs" class="select-input"></select></label>
-          <label id="cloudSourceField" class="wide hidden"><span>云端仓库镜像</span><select id="createCloudRootfs" class="select-input"></select><button id="createCloudDownloadBtn" class="text-btn" type="button">下载所选镜像</button><div id="createCloudTask" class="inline-progress"></div></label>
-          <label id="directSourceField" class="wide hidden"><span>RootFS 或镜像路径</span><input id="createRootfs" type="text" placeholder="/data/local/Droidspaces/Containers/name/rootfs 或 rootfs.img" /></label>
-          <label><span>网络</span><select id="createNetMode"><option value="host">host</option><option value="nat">nat</option><option value="none">none</option><option value="gateway">gateway</option></select></label>
-          <label><span>DNS</span><input id="createDns" type="text" placeholder="1.1.1.1,8.8.8.8" /></label>
-          <label class="wide"><span>端口转发</span><input id="createPorts" type="text" placeholder="2222:22/tcp,8080:80/tcp" /></label>
-          <label class="wide"><span>绑定挂载</span><input id="createBinds" type="text" placeholder="/sdcard:/mnt/sdcard:ro" /></label>
+          <label class="check"><input id="createUseSparseImage" type="checkbox" checked /><span>启用稀疏镜像</span></label>
+          <label id="createImageSizeField"><span>镜像大小 GB</span><input id="createImageSize" type="number" min="4" max="512" step="1" value="8" /></label>
+          <label><span>网络</span><select id="createNetMode"><option value="nat" selected>nat</option><option value="host">host</option><option value="none">none</option><option value="gateway">gateway</option></select></label>
+          <div id="createNatIpField" class="nat-ip-field"><span class="field-label">NAT 静态 IP</span><div class="nat-ip-row single-octet"><span id="createStaticNatPrefix" class="nat-ip-prefix">172.28.1.</span><label><span>第 4 字节</span><input id="createStaticNatOctet4" data-static-nat-prefix="create" type="number" min="1" max="254" step="1" inputmode="numeric" placeholder="自动" /></label></div><span class="field-desc">只填写第 4 位（1-254）；留空时按当前容器 IP 顺序自动加一。</span><input id="createStaticNatIp" type="hidden" /></div>
+          <div id="createNatUpstreamField" class="interface-field wide hidden"><label><span>Android NAT 上游接口</span><input id="createNatUpstreamIfnames" data-upstream-input="create" type="text" placeholder="wlan0,r_rmnet_data0,rmnet0" /></label><div id="createNatUpstreamOrder" class="interface-order-list" aria-label="Android NAT 上游接口顺序"></div></div>
+          <label class="wide"><span>DNS</span><input id="createDns" type="text" placeholder="1.1.1.1,8.8.8.8" /></label>
+          <label id="createPortsField" class="wide"><span>端口转发（每行一条）</span><textarea id="createPorts" class="form-textarea" rows="3" spellcheck="false" placeholder="2222:22/tcp&#10;8080:80/tcp&#10;10000-10010:10000-10010/udp"></textarea></label>
+          <div id="createGatewayFields" class="form-subgrid wide hidden"><label><span>网关容器</span><input id="createGatewayContainer" type="text" placeholder="openwrt" /></label><label><span>网关网络名</span><input id="createGatewayNet" type="text" placeholder="lan" /></label><label><span>网关内接口</span><input id="createGatewayIface" type="text" placeholder="eth1" /></label><label><span>宿主桥接名</span><input id="createGatewayBridge" type="text" placeholder="ds-lan" /></label></div>
+          <label class="wide"><span>绑定挂载（每行一条）</span><textarea id="createBinds" class="form-textarea" rows="3" spellcheck="false" placeholder="/sdcard:/mnt/sdcard:ro&#10;/data/share:/mnt/share"></textarea></label>
           <label><span>Init</span><input id="createInit" type="text" placeholder="/sbin/init" /></label>
+          <label id="createTx11FlagsField" class="wide hidden"><span>X11 额外参数</span><input id="createTx11ExtraFlags" type="text" placeholder="tx11_extra_flags" disabled /></label>
+          <label id="createVirglFlagsField" class="wide hidden"><span>VirGL 额外参数</span><input id="createVirglExtraFlags" type="text" placeholder="virgl_extra_flags" disabled /></label>
+          <label><span>内存限制</span><input id="createMemoryLimit" type="text" placeholder="512M / 2G" /></label>
+          <label><span>CPU 限制</span><input id="createCpus" type="number" min="0" step="0.1" placeholder="1.5" /></label>
+          <label><span>PIDs 限制</span><input id="createPidsLimit" type="number" min="0" step="1" placeholder="1024" /></label>
           <label class="check"><input id="createStart" type="checkbox" /><span>创建后启动</span></label>
         </div>
-        <div class="check-grid"><label><input id="createAndroidStorage" type="checkbox" />Android 存储</label><label><input id="createGpu" type="checkbox" />GPU</label><label><input id="createTermuxX11" type="checkbox" />Termux X11</label><label><input id="createPulse" type="checkbox" />PulseAudio</label><label><input id="createVolatile" type="checkbox" />易失模式</label><label><input id="createDisableIpv6" type="checkbox" />禁用 IPv6</label></div>
+        <div class="option-grid"><label data-android-only hidden><input id="createAndroidStorage" type="checkbox" /><span class="option-main"><span class="option-name">Android 存储</span><span class="option-desc">挂载 Android 存储。</span></span></label><label><input id="createHwAccess" type="checkbox" /><span class="option-main"><span class="option-name">硬件访问</span><span class="option-desc">完整的硬件访问权限。</span></span></label><label><input id="createGpu" type="checkbox" /><span class="option-main"><span class="option-name">GPU 访问</span><span class="option-desc">将 GPU 节点镜像到隔离的 /dev（非完整硬件直通）。</span></span></label><label><input id="createTermuxX11" type="checkbox" /><span class="option-main"><span class="option-name">配置 Termux:X11</span><span class="option-desc">为 Termux:X11 启用 X11 套接字挂载。</span></span></label><label><input id="createVirgl" type="checkbox" /><span class="option-main"><span class="option-name">配置 VirGL 3D 加速功能</span><span class="option-desc">通过 VirGL 启用 3D 硬件加速。</span></span></label><label><input id="createPulse" type="checkbox" /><span class="option-main"><span class="option-name">配置 PulseAudio</span><span class="option-desc">通过 PulseAudio 启用音频支持。</span></span></label><label><input id="createSelinuxPermissive" type="checkbox" /><span class="option-main"><span class="option-name">SELinux 宽容模式</span><span class="option-desc">将 SELinux 设置为宽容模式。</span></span></label><label><input id="createAllowUserns" type="checkbox" /><span class="option-main"><span class="option-name">允许用户命名空间</span><span class="option-desc">为 Docker、Podman 等嵌套容器运行时解除用户命名空间限制。</span></span></label><label><input id="createVolatile" type="checkbox" /><span class="option-main"><span class="option-name">易失模式</span><span class="option-desc">仅内存模式（停止后更改将丢失）。</span></span></label><label><input id="createRunAtBoot" type="checkbox" /><span class="option-main"><span class="option-name">开机启动</span><span class="option-desc">加入 Droidspaces 的容器启动队列。</span></span></label><label><input id="createForceCgroupV1" type="checkbox" /><span class="option-main"><span class="option-name">强制 Cgroup V1</span><span class="option-desc">强制使用旧版 Cgroup V1 层级结构。</span></span></label><label><input id="createDisableIpv6" type="checkbox" /><span class="option-main"><span class="option-name">禁用 IPv6</span><span class="option-desc">在此容器中禁用 IPv6。这可能会导致宿主机的 VPN 应用异常。</span></span></label><label><input id="createBlockNestedNS" type="checkbox" /><span class="option-main"><span class="option-name">手动死锁防护</span><span class="option-desc">通过阻止嵌套命名空间创建，防止旧版内核上的 VFS 死锁；会屏蔽 Docker、Podman、LXC 及 Systemd 沙盒功能。</span></span></label></div>
+        <div class="form-grid"><fieldset id="createPrivilegedMode" class="privileged-options wide"><legend>特权模式</legend><p class="privileged-summary">为嵌套虚拟化或高级硬件访问配置细粒度的安全限制放宽。</p><label><input type="checkbox" value="full" /><span class="option-main"><span class="option-name privileged-name">full</span><span class="option-desc">同时启用所有特权标志。</span></span></label><label><input type="checkbox" value="nomask" /><span class="option-main"><span class="option-name privileged-name">nomask</span><span class="option-desc">禁用隔离掩码以允许对 /proc 和 /sys 的写访问。注意：除非同时启用了“硬件访问”，否则 /sys 将保持只读状态。</span></span></label><label><input type="checkbox" value="nocaps" /><span class="option-main"><span class="option-name privileged-name">nocaps</span><span class="option-desc">保留所有 Linux Capabilities（完整 root 权限）。</span></span></label><label><input type="checkbox" value="noseccomp" /><span class="option-main"><span class="option-name privileged-name">noseccomp</span><span class="option-desc">禁用 Seccomp 系统调用过滤。启用非特权用户命名空间等高级内核功能，是嵌套沙箱的必要条件，并允许加载树外内核模块。</span></span></label><label><input type="checkbox" value="shared" /><span class="option-main"><span class="option-name privileged-name">shared</span><span class="option-desc">启用至宿主机的 MS_SHARED 挂载传播。</span></span></label><label><input type="checkbox" value="unfiltered-dev" /><span class="option-main"><span class="option-name privileged-name">unfiltered-dev</span><span class="option-desc">绕过设备过滤。宿主机的所有 /dev 节点都将可见。</span></span></label></fieldset></div>
         <label class="env-field"><span>环境变量 .env</span><textarea id="createEnv" spellcheck="false" placeholder="KEY=value"></textarea></label>
-        <div class="modal-actions"><button class="text-btn" type="button" id="createCancelBtn">取消</button><button class="text-btn primary" type="submit">创建</button></div>
+        </div>
+        <div class="modal-actions"><small id="createValidationSummary" class="form-validation-summary hidden" role="alert" aria-live="polite"></small><button class="text-btn" type="button" id="createCancelBtn">取消</button><button class="text-btn primary" type="submit">创建</button></div>
       </form>
     </div>
 
+    <div id="configModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="configTitle">
+      <form id="configForm" class="modal-box create-box">
+        <div class="modal-head"><div><h2 id="configTitle">修改运行配置</h2><p id="configSubtitle" class="muted">保存时运行中的容器会先停止，并默认恢复启动</p></div><button id="configCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button></div>
+        <input id="configName" type="hidden" />
+        <div class="form-grid">
+          <label><span>主机名</span><input id="configHostname" type="text" placeholder="默认同容器名称" /></label>
+          <label><span>网络</span><select id="configNetMode"><option value="nat">nat</option><option value="host">host</option><option value="none">none</option><option value="gateway">gateway</option></select></label>
+          <div id="configNatIpField" class="nat-ip-field"><span class="field-label">NAT 静态 IP</span><div class="nat-ip-row single-octet"><span id="configStaticNatPrefix" class="nat-ip-prefix">172.28.1.</span><label><span>第 4 字节</span><input id="configStaticNatOctet4" data-static-nat-prefix="config" type="number" min="0" max="254" step="1" inputmode="numeric" placeholder="留空清除" /></label></div><span class="field-desc">只可修改第 4 位；留空表示清除静态 IP。</span><input id="configStaticNatIp" type="hidden" /></div>
+          <div id="configNatUpstreamField" class="interface-field wide hidden"><label><span>Android NAT 上游接口</span><input id="configNatUpstreamIfnames" data-upstream-input="config" type="text" placeholder="wlan0,r_rmnet_data0,rmnet0" /></label><div id="configNatUpstreamOrder" class="interface-order-list" aria-label="Android NAT 上游接口顺序"></div></div>
+          <label class="wide"><span>DNS</span><input id="configDns" type="text" placeholder="1.1.1.1,8.8.8.8" /></label>
+          <label><span>Init</span><input id="configInit" type="text" placeholder="/sbin/init" /></label>
+          <label id="configPortsField" class="wide"><span>端口转发（每行一条）</span><textarea id="configPorts" class="form-textarea" rows="3" spellcheck="false" placeholder="2222:22/tcp&#10;8080:80/tcp&#10;10000-10010:10000-10010/udp"></textarea></label>
+          <div id="configGatewayFields" class="form-subgrid wide hidden"><label><span>网关容器</span><input id="configGatewayContainer" type="text" placeholder="openwrt" /></label><label><span>网关网络名</span><input id="configGatewayNet" type="text" placeholder="lan" /></label><label><span>网关内接口</span><input id="configGatewayIface" type="text" placeholder="eth1" /></label><label><span>宿主桥接名</span><input id="configGatewayBridge" type="text" placeholder="ds-lan" /></label></div>
+          <label class="wide"><span>绑定挂载（每行一条）</span><textarea id="configBinds" class="form-textarea" rows="3" spellcheck="false" placeholder="/sdcard:/mnt/sdcard:ro&#10;/data/share:/mnt/share"></textarea></label>
+          <label id="configTx11FlagsField" class="wide hidden"><span>X11 额外参数</span><input id="configTx11ExtraFlags" type="text" placeholder="tx11_extra_flags" disabled /></label>
+          <label id="configVirglFlagsField" class="wide hidden"><span>VirGL 额外参数</span><input id="configVirglExtraFlags" type="text" placeholder="virgl_extra_flags" disabled /></label>
+          <label><span>内存限制</span><input id="configMemoryLimit" type="text" placeholder="512M / 2G" /></label>
+          <label><span>CPU 限制</span><input id="configCpus" type="number" min="0" step="0.1" placeholder="1.5" /></label>
+          <label><span>PIDs 限制</span><input id="configPidsLimit" type="number" min="0" step="1" placeholder="1024" /></label>
+          <label class="check wide"><input id="configRestore" type="checkbox" checked /><span>保存后恢复启动运行中的容器</span></label>
+        </div>
+        <div class="option-grid"><label data-android-only hidden><input id="configAndroidStorage" type="checkbox" /><span class="option-main"><span class="option-name">Android 存储</span><span class="option-desc">挂载 Android 存储。</span></span></label><label><input id="configHwAccess" type="checkbox" /><span class="option-main"><span class="option-name">硬件访问</span><span class="option-desc">完整的硬件访问权限。</span></span></label><label><input id="configGpu" type="checkbox" /><span class="option-main"><span class="option-name">GPU 访问</span><span class="option-desc">将 GPU 节点镜像到隔离的 /dev（非完整硬件直通）。</span></span></label><label><input id="configTermuxX11" type="checkbox" /><span class="option-main"><span class="option-name">配置 Termux:X11</span><span class="option-desc">为 Termux:X11 启用 X11 套接字挂载。</span></span></label><label><input id="configVirgl" type="checkbox" /><span class="option-main"><span class="option-name">配置 VirGL 3D 加速功能</span><span class="option-desc">通过 VirGL 启用 3D 硬件加速。</span></span></label><label><input id="configPulse" type="checkbox" /><span class="option-main"><span class="option-name">配置 PulseAudio</span><span class="option-desc">通过 PulseAudio 启用音频支持。</span></span></label><label><input id="configSelinuxPermissive" type="checkbox" /><span class="option-main"><span class="option-name">SELinux 宽容模式</span><span class="option-desc">将 SELinux 设置为宽容模式。</span></span></label><label><input id="configAllowUserns" type="checkbox" /><span class="option-main"><span class="option-name">允许用户命名空间</span><span class="option-desc">为 Docker、Podman 等嵌套容器运行时解除用户命名空间限制。</span></span></label><label><input id="configVolatile" type="checkbox" /><span class="option-main"><span class="option-name">易失模式</span><span class="option-desc">仅内存模式（停止后更改将丢失）。</span></span></label><label><input id="configRunAtBoot" type="checkbox" /><span class="option-main"><span class="option-name">开机启动</span><span class="option-desc">加入 Droidspaces 的容器启动队列。</span></span></label><label><input id="configForceCgroupV1" type="checkbox" /><span class="option-main"><span class="option-name">强制 Cgroup V1</span><span class="option-desc">强制使用旧版 Cgroup V1 层级结构。</span></span></label><label><input id="configDisableIpv6" type="checkbox" /><span class="option-main"><span class="option-name">禁用 IPv6</span><span class="option-desc">在此容器中禁用 IPv6。这可能会导致宿主机的 VPN 应用异常。</span></span></label><label><input id="configBlockNestedNS" type="checkbox" /><span class="option-main"><span class="option-name">手动死锁防护</span><span class="option-desc">通过阻止嵌套命名空间创建，防止旧版内核上的 VFS 死锁；会屏蔽 Docker、Podman、LXC 及 Systemd 沙盒功能。</span></span></label></div>
+        <div class="form-grid"><fieldset id="configPrivilegedMode" class="privileged-options wide"><legend>特权模式</legend><p class="privileged-summary">为嵌套虚拟化或高级硬件访问配置细粒度的安全限制放宽。</p><label><input type="checkbox" value="full" /><span class="option-main"><span class="option-name privileged-name">full</span><span class="option-desc">同时启用所有特权标志。</span></span></label><label><input type="checkbox" value="nomask" /><span class="option-main"><span class="option-name privileged-name">nomask</span><span class="option-desc">禁用隔离掩码以允许对 /proc 和 /sys 的写访问。注意：除非同时启用了“硬件访问”，否则 /sys 将保持只读状态。</span></span></label><label><input type="checkbox" value="nocaps" /><span class="option-main"><span class="option-name privileged-name">nocaps</span><span class="option-desc">保留所有 Linux Capabilities（完整 root 权限）。</span></span></label><label><input type="checkbox" value="noseccomp" /><span class="option-main"><span class="option-name privileged-name">noseccomp</span><span class="option-desc">禁用 Seccomp 系统调用过滤。启用非特权用户命名空间等高级内核功能，是嵌套沙箱的必要条件，并允许加载树外内核模块。</span></span></label><label><input type="checkbox" value="shared" /><span class="option-main"><span class="option-name privileged-name">shared</span><span class="option-desc">启用至宿主机的 MS_SHARED 挂载传播。</span></span></label><label><input type="checkbox" value="unfiltered-dev" /><span class="option-main"><span class="option-name privileged-name">unfiltered-dev</span><span class="option-desc">绕过设备过滤。宿主机的所有 /dev 节点都将可见。</span></span></label></fieldset></div>
+        <label class="env-field"><span>环境变量 .env</span><textarea id="configEnv" spellcheck="false" placeholder="KEY=value"></textarea></label>
+        <div class="modal-actions"><small id="configSaveStatus" class="inline-progress config-save-status hidden" role="status" aria-live="polite"></small><button class="text-btn" type="button" id="configCancelBtn">取消</button><button class="text-btn primary" type="submit">保存配置</button></div>
+      </form>
+    </div>
+
+    <div id="bootPriorityModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="bootPriorityTitle">
+      <section class="modal-box boot-priority-box">
+        <div class="modal-head"><div><h2 id="bootPriorityTitle">开机启动顺序</h2><p class="muted">按从上到下的顺序写入启动优先级</p></div><button id="bootPriorityCloseBtn" class="icon-btn" type="button" title="关闭" aria-label="关闭">×</button></div>
+        <div id="bootPriorityList" class="priority-list"><div class="empty-state">加载中</div></div>
+        <div class="modal-actions"><button id="bootPriorityCancelBtn" class="text-btn" type="button">取消</button><button id="bootPrioritySaveBtn" class="text-btn primary" type="button">保存顺序</button></div>
+      </section>
+    </div>
+
+    <section id="taskFloat" class="task-float hidden" role="dialog" aria-live="polite" aria-labelledby="taskFloatTitle">
+      <div class="task-float-head">
+        <div>
+          <h2 id="taskFloatTitle">任务输出</h2>
+          <p id="taskFloatStatus" class="muted">暂无任务</p>
+        </div>
+        <div class="tool-buttons">
+          <button id="taskFloatRefreshBtn" class="icon-btn" type="button" title="刷新任务输出" aria-label="刷新任务输出">↻</button>
+          <button id="taskFloatCloseBtn" class="icon-btn" type="button" title="关闭任务输出" aria-label="关闭任务输出">×</button>
+        </div>
+      </div>
+      <div id="taskFloatList" class="task-list floating"><div class="empty-state">暂无任务输出</div></div>
+    </section>
+
+    <section id="taskOverviewFloat" class="task-float task-overview-float hidden" role="dialog" aria-live="polite" aria-labelledby="taskOverviewTitle">
+      <div class="task-float-head">
+        <div>
+          <h2 id="taskOverviewTitle">后台任务</h2>
+          <p id="taskOverviewStatus" class="muted">本次服务运行的任务统计</p>
+        </div>
+        <div class="tool-buttons">
+          <button id="taskOverviewRefreshBtn" class="icon-btn" type="button" title="刷新后台任务" aria-label="刷新后台任务">↻</button>
+          <button id="taskOverviewCloseBtn" class="icon-btn" type="button" title="关闭后台任务" aria-label="关闭后台任务">×</button>
+        </div>
+      </div>
+      <div class="task-overview-body">
+        <div id="taskOverviewSummary" class="task-summary-grid" aria-label="后台任务统计"></div>
+        <section class="task-overview-active" aria-labelledby="taskOverviewActiveTitle">
+          <h3 id="taskOverviewActiveTitle">当前任务</h3>
+          <div id="taskOverviewList" class="task-overview-list"><div class="empty-state">暂无运行中的后台任务</div></div>
+        </section>
+      </div>
+    </section>
+
     <div id="loginOverlay" class="login-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="loginTitle"><form id="loginForm" class="login-box"><h2 id="loginTitle">WebUI 授权</h2><input id="loginToken" type="password" autocomplete="current-password" placeholder="输入 authToken" /><button class="text-btn primary" type="submit">进入</button><div id="loginError" class="login-error"></div></form></div>
-    <div id="toast" class="toast hidden"></div>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
     <script src="/app.js" defer></script>
   </body>
 </html>

@@ -26,7 +26,9 @@ adb_cmd() {
 }
 
 remote_su() {
-  adb_cmd shell su -c "$1"
+  local quoted_command
+  quoted_command=$(shell_quote "$1")
+  adb_cmd shell "su -c ${quoted_command}"
 }
 
 shell_quote() {

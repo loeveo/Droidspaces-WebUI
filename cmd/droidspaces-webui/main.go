@@ -1,15 +1,21 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/ravindu644/droidspaces-oss/webui/internal/config"
 	"github.com/ravindu644/droidspaces-oss/webui/internal/web"
 )
+
+var webVersion = "dev"
 
 func main() {
 	configPath := flag.String("config", "", "path to the WebUI JSON config file")
@@ -64,17 +70,32 @@ func main() {
 	}
 
 	server, err := web.NewServer(web.Options{
-		DroidspacesPath:     cfg.DroidspacesPath,
-		AuthToken:           cfg.AuthToken,
-		Workspace:           cfg.Workspace,
-		ConfigPath:          usedConfigPath,
-		Mode:                cfg.Mode,
-		CorePath:            cfg.CorePath,
-		ImageRoot:           cfg.ImageRoot,
-		TemplateImageRoot:   cfg.TemplateImageRoot,
-		SocketdEnabled:      boolValue(cfg.SocketdEnabled),
-		RootfsRepos:         cfg.RootfsRepositories,
-		RootfsSkipTLSVerify: cfg.RootfsSkipTLSVerify,
+		DroidspacesPath:          cfg.DroidspacesPath,
+		WebVersion:               webVersion,
+		SupportedCoreVersion:     web.DefaultSupportedCoreVersion,
+		AuthToken:                cfg.AuthToken,
+		Workspace:                cfg.Workspace,
+		ConfigPath:               usedConfigPath,
+		Mode:                     cfg.Mode,
+		Host:                     cfg.Host,
+		Port:                     cfg.Port,
+		CorePath:                 cfg.CorePath,
+		ImageRoot:                cfg.ImageRoot,
+		TemplateImageRoot:        cfg.TemplateImageRoot,
+		SocketdEnabled:           boolValue(cfg.SocketdEnabled),
+		RootfsRepos:              cfg.RootfsRepositories,
+		RootfsSkipTLSVerify:      cfg.RootfsSkipTLSVerify,
+		DefaultNATCIDR:           cfg.DefaultNATCIDR,
+		DefaultNATThirdOctet:     cfg.DefaultNATThirdOctet,
+		NestedAndroidNATCompat:   cfg.NestedAndroidNATCompat,
+		BatteryDirectPower:       cfg.BatteryDirectPower,
+		BatterySeriesCells:       cfg.BatterySeriesCells,
+		OverviewPowerEnabled:     &cfg.OverviewPowerEnabled,
+		BatteryMonitoringEnabled: &cfg.BatteryMonitoringEnabled,
+		BatteryDetailEnabled:     &cfg.BatteryDetailEnabled,
+		BatteryStatsSampleSecs:   cfg.BatteryStatsSampleSecs,
+		BatteryStatsWriteMins:    cfg.BatteryStatsWriteMins,
+		OverviewRefreshSecs:      cfg.OverviewRefreshSecs,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -91,10 +112,32 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	fmt.Printf("Droidspaces WebUI listening on http://%s\n", addr)
-	fmt.Printf("Config file: %s\n", usedConfigPath)
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+	log.Printf("Droidspaces WebUI listening on http://%s", addr)
+	log.Printf("Config file: %s", usedConfigPath)
+	if cfg.GeneratedAuthToken {
+		fmt.Printf("Generated temporary auth token: %s\n", cfg.AuthToken)
+		fmt.Printf("Set authToken in the WebUI settings or config file to make it persistent.\n")
+	}
+	listenErr := make(chan error, 1)
+	go func() { listenErr <- httpServer.ListenAndServe() }()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case err := <-listenErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	case signalValue := <-signals:
+		log.Printf("received %s; stopping WebUI", signalValue)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := server.Close(shutdownCtx); err != nil {
+			log.Printf("WebUI background cleanup: %v", err)
+		}
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP shutdown: %v", err)
+		}
 	}
 }
 

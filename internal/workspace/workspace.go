@@ -166,6 +166,51 @@ func parseContainerConfig(path string, fallbackName string) socketd.Container {
 	return container
 }
 
+func UpdateContainerConfig(path string, updates map[string]string) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(data)
+	endsWithNewline := strings.HasSuffix(text, "\n")
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	seen := map[string]bool{}
+	outLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "=") {
+			outLines = append(outLines, line)
+			continue
+		}
+		key, _, _ := strings.Cut(trimmed, "=")
+		key = strings.TrimSpace(key)
+		value, ok := updates[key]
+		if !ok {
+			outLines = append(outLines, line)
+			continue
+		}
+		seen[key] = true
+		if value == "" {
+			continue
+		}
+		outLines = append(outLines, key+"="+value)
+	}
+	for key, value := range updates {
+		if seen[key] || value == "" {
+			continue
+		}
+		outLines = append(outLines, key+"="+value)
+	}
+	out := strings.Join(outLines, "\n")
+	if endsWithNewline || out != "" {
+		out += "\n"
+	}
+	return os.WriteFile(path, []byte(out), 0644)
+}
+
 func parsePorts(value string) []socketd.Port {
 	if value == "" {
 		return nil

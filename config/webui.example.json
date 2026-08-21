@@ -1,12 +1,12 @@
 {
   "_说明": "Droidspaces WebUI 默认配置模板。所有以下划线开头或带 _说明 后缀的字段都会被程序忽略，可以保留。",
-  "mode_说明": "监听模式。local 只允许本机/ADB forward 访问；public 用于局域网或公网访问，必须配置 authToken。",
+  "mode_说明": "监听模式。local 只允许本机/ADB forward 访问；public 用于局域网或公网访问，建议配置固定 authToken；留空会生成临时密钥。",
   "mode": "local",
   "host_说明": "WebUI 监听地址。local 通常使用 127.0.0.1；public 通常使用 0.0.0.0。",
   "host": "127.0.0.1",
   "port_说明": "WebUI 监听端口，范围 1-65535。使用 adb forward 时电脑端和手机端通常都转发到这个端口。",
   "port": 9090,
-  "authToken_说明": "Web API 授权密钥。public 模式必须填写；local 模式也可以填写以增加保护。浏览器首次访问会提示输入该 token。",
+  "authToken_说明": "Web API 授权密钥。public 模式留空时程序会生成 8 位临时密钥并打印到启动日志；local 模式也可以填写以增加保护。浏览器首次访问会提示输入该 token。",
   "authToken": "",
   "droidspacesPath_说明": "Droidspaces 核心程序的完整路径。WebUI 的诊断命令会调用这个二进制。",
   "droidspacesPath": "/data/local/Droidspaces/bin/droidspaces",
@@ -22,11 +22,37 @@
   "socketdEnabled": true,
   "rootfsSkipTLSVerify_说明": "RootFS 仓库和下载请求是否跳过 TLS 证书校验。Android 精简环境缺少 CA 证书时 GitHub 可能报 x509 unknown authority，可保持 true；证书链正常且需要严格校验时改为 false。",
   "rootfsSkipTLSVerify": true,
-  "rootfsRepositories_说明": "RootFS 云端列表。格式参考 Android App 的 RootfsRepository，URL 指向 rootfs.json。可以添加多个仓库。",
+  "defaultNatCIDR_说明": "NAT 容器内部地址池固定为 172.28.0.0/16，保留兼容字段。",
+  "defaultNatCIDR": "172.28.0.0/16",
+  "defaultNatThirdOctet_说明": "WebUI 创建 NAT 容器时默认使用的第三位，例如 3 表示默认前缀 172.28.3.x。范围 1-254。",
+  "defaultNatThirdOctet": 1,
+  "nestedAndroidNatCompat_说明": "仅当 WebUI 运行在 Android 宿主网络命名空间内的 Linux 容器中，且其内部继续创建 NAT 容器时启用。WebUI 只临时补齐共享的策略路由，不修改 Droidspaces 核心、防火墙、NAT/DNAT、容器镜像或系统启动项；外层 Android 的 FORWARD 策略仍由外层 Droidspaces 负责。",
+  "nestedAndroidNatCompat": false,
+  "batteryDirectPowerSupported_说明": "设备是否支持直供电/旁路供电。开启后，检测到外部输入在线且电池没有实际充放电流时，会显示为直供电。",
+  "batteryDirectPowerSupported": false,
+  "batterySeriesCells_说明": "电池串联结构。0 表示自动按电池包电压识别；1 表示单节/单块；2 表示 2S 双串。部分双电芯手机会上报合并 mAh，设置为 2 可修正 Wh 估算。",
+  "batterySeriesCells": 0,
+  "overviewPowerEnabled_说明": "是否在首页概览中显示当前功耗卡片。关闭只隐藏首页卡片，不影响已经启用的电池监控采样和历史。",
+  "overviewPowerEnabled": true,
+  "batteryMonitoringEnabled_说明": "是否启用电池监控。关闭后隐藏电池监控入口和页面，停止后台电池采样，电池接口返回已关闭状态。",
+  "batteryMonitoringEnabled": true,
+  "batteryDetailEnabled_说明": "兼容旧配置项。首页现在仅显示当前功耗，完整充放电详情固定在电池监控页面。",
+  "batteryDetailEnabled": true,
+  "batteryStatsSampleSeconds_说明": "后端电池库仑计采样间隔，单位秒。WebUI 后台会按此周期持续采样并先累计在内存中，范围 1-60，默认 3。",
+  "batteryStatsSampleSeconds": 3,
+  "batteryStatsWriteMinutes_说明": "电池统计落盘写入间隔，单位分钟。未到写入时间的样本只保存在内存中，减少 UFS 写入；范围 5-1440，默认 5。",
+  "batteryStatsWriteMinutes": 5,
+  "overviewRefreshSeconds_说明": "首页概览高频刷新间隔，单位秒。仅在浏览器停留在概览页且页面可见时生效，范围 1-60。",
+  "overviewRefreshSeconds": 3,
+  "rootfsRepositories_说明": "RootFS 云端列表。普通仓库 URL 指向 rootfs.json；Linux Containers 默认使用 https://images.linuxcontainers.org/。在设置中启用 CN 加速时，现有 Linux Containers 条目的 URL 会切换为 https://mirror.nju.edu.cn/lxc-images/，不会添加第二个来源；目录仍由官方读取，镜像文件从南京大学下载。可以添加多个其他仓库。",
   "rootfsRepositories": [
     {
       "name": "Droidspaces Official",
       "url": "https://github.com/Droidspaces/Droidspaces-rootfs-builder/raw/refs/heads/main/rootfs.json"
+    },
+    {
+      "name": "Linux Containers",
+      "url": "https://images.linuxcontainers.org/"
     }
   ]
 }
