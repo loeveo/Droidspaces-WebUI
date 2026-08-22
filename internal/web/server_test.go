@@ -33,7 +33,6 @@ import (
 	"github.com/ravindu644/droidspaces-oss/webui/internal/config"
 	"github.com/ravindu644/droidspaces-oss/webui/internal/rootfs"
 	"github.com/ravindu644/droidspaces-oss/webui/internal/socketd"
-	workspacepkg "github.com/ravindu644/droidspaces-oss/webui/internal/workspace"
 )
 
 func newTestServer(t *testing.T) (*Server, string, string) {
@@ -49,13 +48,14 @@ func newTestServer(t *testing.T) (*Server, string, string) {
 	installFakeDroidspaces(t, corePath)
 	t.Setenv("WEBUI_ROOTFS_IMG_MOCK", "1")
 	srv, err := NewServer(Options{
-		DroidspacesPath:       filepath.Join(corePath, "droidspaces"),
-		Workspace:             workspace,
-		CorePath:              corePath,
-		ImageRoot:             filepath.Join(workspace, "images"),
-		TemplateImageRoot:     templateRoot,
-		AuthToken:             "secret",
-		DisableBatterySampler: true,
+		DroidspacesPath:             filepath.Join(corePath, "droidspaces"),
+		Workspace:                   workspace,
+		CorePath:                    corePath,
+		ImageRoot:                   filepath.Join(workspace, "images"),
+		TemplateImageRoot:           templateRoot,
+		AuthToken:                   "secret",
+		DisableBatterySampler:       true,
+		DisableRootfsCatalogRefresh: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -63,38 +63,147 @@ func newTestServer(t *testing.T) (*Server, string, string) {
 	return srv, workspace, templateRoot
 }
 
-func TestCollectContainerUsagePrefersCgroupMemory(t *testing.T) {
+func TestNewServerDefaultsPathsFromWorkspace(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	srv, err := NewServer(Options{
+		Workspace:                   workspace,
+		DisableBatterySampler:       true,
+		DisableRootfsCatalogRefresh: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+
+	if got, want := srv.droidspacesPath, filepath.Join(workspace, "bin", "droidspaces"); got != want {
+		t.Fatalf("droidspacesPath = %q, want %q", got, want)
+	}
+	if got, want := srv.corePath, filepath.Join(workspace, "bin"); got != want {
+		t.Fatalf("corePath = %q, want %q", got, want)
+	}
+	if got, want := srv.templateImageRoot, filepath.Join(workspace, "rootfs"); got != want {
+		t.Fatalf("templateImageRoot = %q, want %q", got, want)
+	}
+	if srv.imageRoot != srv.templateImageRoot {
+		t.Fatalf("imageRoot = %q, want %q", srv.imageRoot, srv.templateImageRoot)
+	}
+}
+
+func TestSystemSettingsEmptyPathsUseWorkspaceLayout(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	settings, err := srv.normalizeSystemSettings(systemSettingsRequest{
+		Mode:      config.ModeLocal,
+		Port:      9090,
+		Workspace: workspace,
+		RootfsRepositories: []config.RootfsRepository{{
+			Name: "Test",
+			URL:  "https://example.test/rootfs.json",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := settings.DroidspacesPath, filepath.Join(workspace, "bin", "droidspaces"); got != want {
+		t.Fatalf("droidspacesPath = %q, want %q", got, want)
+	}
+	if got, want := settings.CorePath, filepath.Join(workspace, "bin"); got != want {
+		t.Fatalf("corePath = %q, want %q", got, want)
+	}
+	if got, want := settings.TemplateImageRoot, filepath.Join(workspace, "rootfs"); got != want {
+		t.Fatalf("templateImageRoot = %q, want %q", got, want)
+	}
+	if settings.ImageRoot != settings.TemplateImageRoot {
+		t.Fatalf("imageRoot = %q, want %q", settings.ImageRoot, settings.TemplateImageRoot)
+	}
+}
+
+func TestCollectContainerUsagePrefersCoreRSSAndRetainsCgroupMemory(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	cgroupRoot := filepath.Join(t.TempDir(), "droidspaces")
 	srv.cgroupRoot = cgroupRoot
 	cgroupDir := filepath.Join(cgroupRoot, "demo-container")
 	mustWriteFile(t, filepath.Join(cgroupDir, "memory.current"), []byte("142876673\n"), 0644)
 	mustWriteFile(t, filepath.Join(cgroupDir, "memory.max"), []byte("4294967296\n"), 0644)
+	mustWriteFile(t, filepath.Join(cgroupDir, "memory.stat"), []byte("anon 62914560\nfile 67108864\nkernel_stack 1048576\npagetables 2097152\npercpu 524288\nsock 262144\nvmalloc 0\nslab 4194304\n"), 0644)
 	t.Setenv("FAKE_USAGE", "UPTIME=9m 22s\nRAM_USED_KB=93200\nRAM_TOTAL_KB=15400164\nCPU_PERMILL=125\n")
 
 	usage, err := srv.collectContainerUsage(context.Background(), "demo container")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.RAMUsedKB == nil || *usage.RAMUsedKB != 142876673/1024 {
-		t.Fatalf("used memory = %#v, want cgroup value", usage.RAMUsedKB)
+	if usage.RAMUsedKB == nil || *usage.RAMUsedKB != 93200 {
+		t.Fatalf("used memory = %#v, want core RSS", usage.RAMUsedKB)
 	}
-	if usage.RAMTotalKB == nil || *usage.RAMTotalKB != 4294967296/1024 {
-		t.Fatalf("total memory = %#v, want cgroup limit", usage.RAMTotalKB)
+	if usage.RAMTotalKB != nil || usage.RAMPercent != nil {
+		t.Fatalf("core RSS must not use the core host total: %#v", usage)
 	}
-	if usage.MemoryUsage == nil || usage.MemoryUsage.UsedBytes != 142876673 || usage.MemoryUsage.TotalBytes != 4294967296 {
-		t.Fatalf("memory usage = %#v, want exact cgroup bytes", usage.MemoryUsage)
+	if usage.MemoryUsageSource != "core-rss" {
+		t.Fatalf("memory usage source = %q, want core-rss", usage.MemoryUsageSource)
 	}
-	if usage.MemoryUsage.Percent == nil || *usage.MemoryUsage.Percent <= 3 || *usage.MemoryUsage.Percent >= 4 {
-		t.Fatalf("memory percent = %#v, want cgroup percent", usage.MemoryUsage.Percent)
+	if usage.MemoryUsage == nil || usage.MemoryUsage.UsedBytes != 93200*1024 || usage.MemoryUsage.TotalBytes != 0 || usage.MemoryUsage.Percent != nil {
+		t.Fatalf("primary memory usage = %#v, want exact core RSS bytes", usage.MemoryUsage)
+	}
+	if usage.CgroupMemoryUsage == nil || usage.CgroupMemoryUsage.UsedBytes != 142876673 || usage.CgroupMemoryUsage.TotalBytes != 4294967296 {
+		t.Fatalf("cgroup memory usage = %#v, want exact cgroup bytes", usage.CgroupMemoryUsage)
+	}
+	if usage.CgroupMemoryUsage.Percent == nil || *usage.CgroupMemoryUsage.Percent <= 3 || *usage.CgroupMemoryUsage.Percent >= 4 {
+		t.Fatalf("cgroup memory percent = %#v, want cgroup percent", usage.CgroupMemoryUsage.Percent)
+	}
+	if usage.CgroupMemoryUsage.AnonBytes == nil || *usage.CgroupMemoryUsage.AnonBytes != 62914560 ||
+		usage.CgroupMemoryUsage.FileBytes == nil || *usage.CgroupMemoryUsage.FileBytes != 67108864 ||
+		usage.CgroupMemoryUsage.KernelBytes == nil || *usage.CgroupMemoryUsage.KernelBytes != 8126464 {
+		t.Fatalf("cgroup memory breakdown = %#v", usage.CgroupMemoryUsage)
 	}
 	view := newContainerView(socketd.Container{Name: "demo container", Running: true})
 	view.applyUsage(usage)
-	if view.MemoryUsage == nil || view.MemoryUsage.UsedBytes != 142876673 || view.MemoryUsage.TotalBytes != 4294967296 {
-		t.Fatalf("view memory usage = %#v, want exact cgroup bytes", view.MemoryUsage)
+	if view.MemoryUsage == nil || view.MemoryUsage.UsedBytes != 93200*1024 || view.MemoryUsageSource != "core-rss" {
+		t.Fatalf("view primary memory usage = %#v", view)
+	}
+	if view.CgroupMemoryUsage == nil || view.CgroupMemoryUsage.UsedBytes != 142876673 || view.CgroupMemoryUsage.FileBytes == nil || *view.CgroupMemoryUsage.FileBytes != 67108864 {
+		t.Fatalf("view cgroup memory usage = %#v", view.CgroupMemoryUsage)
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"memoryUsageSource":"core-rss"`,
+		`"cgroupMemoryUsage":`,
+		`"anonBytes":62914560`,
+		`"fileBytes":67108864`,
+		`"kernelBytes":8126464`,
+	} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("container usage JSON missing %s: %s", want, encoded)
+		}
 	}
 	if usage.Uptime != "9m 22s" || usage.CPUUsage == nil || *usage.CPUUsage != 12.5 {
 		t.Fatalf("non-memory usage fields were not retained: %#v", usage)
+	}
+}
+
+func TestCollectContainerUsageFallsBackToCgroupMemory(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	cgroupRoot := filepath.Join(t.TempDir(), "droidspaces")
+	srv.cgroupRoot = cgroupRoot
+	cgroupDir := filepath.Join(cgroupRoot, "demo")
+	mustWriteFile(t, filepath.Join(cgroupDir, "memory.current"), []byte("104857600\n"), 0644)
+	mustWriteFile(t, filepath.Join(cgroupDir, "memory.max"), []byte("1073741824\n"), 0644)
+	t.Setenv("FAKE_USAGE", "UPTIME=1m\nCPU_PERMILL=0\n")
+
+	usage, err := srv.collectContainerUsage(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.MemoryUsageSource != "cgroup-memory.current" || usage.MemoryUsage == nil || usage.MemoryUsage.UsedBytes != 104857600 {
+		t.Fatalf("cgroup fallback primary memory = %#v", usage)
+	}
+	if usage.CgroupMemoryUsage == nil || usage.CgroupMemoryUsage.UsedBytes != 104857600 {
+		t.Fatalf("cgroup fallback details = %#v", usage.CgroupMemoryUsage)
+	}
+	if usage.RAMUsedKB == nil || *usage.RAMUsedKB != 104857600/1024 || usage.RAMTotalKB == nil || *usage.RAMTotalKB != 1073741824/1024 {
+		t.Fatalf("cgroup fallback legacy fields = %#v", usage)
 	}
 }
 
@@ -1450,7 +1559,7 @@ func TestRootfsListUsesDiskCacheAndManualRefresh(t *testing.T) {
 	}))
 	defer repository.Close()
 
-	srv, workspace, _ := newTestServer(t)
+	srv, _, templateRoot := newTestServer(t)
 	srv.rootfsRepos = []config.RootfsRepository{{Name: "Cache test", URL: repository.URL + "/rootfs.json"}}
 	handler := srv.Handler()
 	arch := rootfs.DeviceArch()
@@ -1479,7 +1588,7 @@ func TestRootfsListUsesDiskCacheAndManualRefresh(t *testing.T) {
 	if first.Cache.CachedAt.IsZero() || first.Cache.Stale {
 		t.Fatalf("first cache metadata=%#v", first.Cache)
 	}
-	cachePath := rootfsListCachePath(workspace, rootfsListCacheFingerprint(arch, srv.rootfsRepos))
+	cachePath := rootfsListCachePath(templateRoot, rootfsListCacheFingerprint(arch, srv.rootfsRepos))
 	if _, err := os.Stat(cachePath); err != nil {
 		t.Fatalf("cache was not written at %s: %v", cachePath, err)
 	}
@@ -1492,6 +1601,134 @@ func TestRootfsListUsesDiskCacheAndManualRefresh(t *testing.T) {
 	refreshed := load(true)
 	if requests.Load() != 2 || len(refreshed.Assets) != 1 || refreshed.Assets[0].Name != "Cached template 2" {
 		t.Fatalf("refresh response=%#v requests=%d", refreshed, requests.Load())
+	}
+}
+
+func TestNextRootfsListCacheRefreshUsesLocal0010(t *testing.T) {
+	location := time.FixedZone("device", 8*60*60)
+	tests := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "before scheduled time",
+			now:  time.Date(2026, time.August, 21, 0, 9, 59, 0, location),
+			want: time.Date(2026, time.August, 21, 0, 10, 0, 0, location),
+		},
+		{
+			name: "at scheduled time advances one day",
+			now:  time.Date(2026, time.August, 21, 0, 10, 0, 0, location),
+			want: time.Date(2026, time.August, 22, 0, 10, 0, 0, location),
+		},
+		{
+			name: "after scheduled time advances one day",
+			now:  time.Date(2026, time.August, 21, 15, 30, 0, 0, location),
+			want: time.Date(2026, time.August, 22, 0, 10, 0, 0, location),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nextRootfsListCacheRefresh(test.now, location); !got.Equal(test.want) {
+				t.Fatalf("next refresh=%s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestScheduledRootfsCatalogRefreshClearsListCacheOnly(t *testing.T) {
+	var requests atomic.Int32
+	repository := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		generation := requests.Add(1)
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"name":         fmt.Sprintf("Scheduled template %d", generation),
+			"architecture": rootfs.DeviceArch(),
+			"download_url": repositoryURL(r, "/rootfs.tar.xz"),
+		}})
+	}))
+	defer repository.Close()
+
+	srv, workspace, templateRoot := newTestServer(t)
+	srv.rootfsRepos = []config.RootfsRepository{{Name: "Scheduled cache", URL: repository.URL + "/rootfs.json"}}
+	arch := rootfs.DeviceArch()
+	initial := srv.cachedRootfsList(context.Background(), arch, false)
+	if requests.Load() != 1 || len(initial.Assets) != 1 || initial.Assets[0].Name != "Scheduled template 1" {
+		t.Fatalf("initial catalog=%#v requests=%d", initial, requests.Load())
+	}
+
+	cacheDirectory := rootfsListCacheDirectory(templateRoot)
+	mustWriteFile(t, filepath.Join(cacheDirectory, "catalog-obsolete.json"), []byte("obsolete"), 0600)
+	mustWriteFile(t, filepath.Join(cacheDirectory, ".catalog-obsolete.tmp"), []byte("temporary"), 0600)
+	mustWriteFile(t, filepath.Join(cacheDirectory, "unrelated.json"), []byte("keep"), 0600)
+	legacyCacheDirectory := filepath.Join(workspace, rootfsLegacyCacheDirectory)
+	mustWriteFile(t, filepath.Join(legacyCacheDirectory, "rootfs-list-obsolete.json"), []byte("legacy"), 0600)
+
+	srv.refreshRootfsCatalogCache(context.Background())
+	if requests.Load() != 2 {
+		t.Fatalf("scheduled refresh requests=%d, want 2", requests.Load())
+	}
+	for _, name := range []string{"catalog-obsolete.json", ".catalog-obsolete.tmp"} {
+		if _, err := os.Stat(filepath.Join(cacheDirectory, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("obsolete catalog cache %q remains, err=%v", name, err)
+		}
+	}
+	if data := mustReadFile(t, filepath.Join(cacheDirectory, "unrelated.json")); string(data) != "keep" {
+		t.Fatalf("unrelated cache file changed: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(legacyCacheDirectory, "rootfs-list-obsolete.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy workspace cache remains, err=%v", err)
+	}
+	items, err := srv.localRootfsItems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Path == filepath.Join(cacheDirectory, "unrelated.json") {
+			t.Fatalf("catalog metadata was listed as a local rootfs item: %#v", item)
+		}
+	}
+
+	refreshed := srv.cachedRootfsList(context.Background(), arch, false)
+	if requests.Load() != 2 || len(refreshed.Assets) != 1 || refreshed.Assets[0].Name != "Scheduled template 2" {
+		t.Fatalf("refreshed catalog=%#v requests=%d", refreshed, requests.Load())
+	}
+}
+
+func TestScheduledRootfsCatalogRefreshKeepsLastCacheWhenFetchFails(t *testing.T) {
+	var fail atomic.Bool
+	repository := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"name":         "Last known catalog",
+			"architecture": rootfs.DeviceArch(),
+			"download_url": repositoryURL(r, "/rootfs.tar.xz"),
+		}})
+	}))
+	defer repository.Close()
+
+	srv, _, templateRoot := newTestServer(t)
+	srv.rootfsRepos = []config.RootfsRepository{{Name: "Flaky scheduled cache", URL: repository.URL + "/rootfs.json"}}
+	arch := rootfs.DeviceArch()
+	initial := srv.cachedRootfsList(context.Background(), arch, false)
+	if len(initial.Assets) != 1 || initial.Assets[0].Name != "Last known catalog" {
+		t.Fatalf("initial catalog=%#v", initial)
+	}
+	cachePath := rootfsListCachePath(templateRoot, rootfsListCacheFingerprint(arch, srv.rootfsRepos))
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("initial cache missing: %v", err)
+	}
+
+	fail.Store(true)
+	srv.refreshRootfsCatalogCache(context.Background())
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("failed refresh removed the last usable cache: %v", err)
+	}
+	retained := srv.cachedRootfsList(context.Background(), arch, false)
+	if len(retained.Assets) != 1 || retained.Assets[0].Name != "Last known catalog" || retained.Cache.Stale {
+		t.Fatalf("retained catalog=%#v", retained)
 	}
 }
 
@@ -1714,10 +1951,10 @@ func TestLocalRootfsItemsSeparateStorageSources(t *testing.T) {
 
 	paths := map[string]string{
 		filepath.Join(templateRoot, "legacy.tar.gz"):                                                "旧模板目录",
-		filepath.Join(templateRoot, "Debian-trixie-Linux-Containers-aarch64-20260810_05-24.tar.xz"): "Linux Containers（旧目录）",
+		filepath.Join(templateRoot, "Debian-trixie-Linux-Containers-aarch64-20260810_05-24.tar.xz"): "lxc-image（旧目录）",
 		filepath.Join(templateRoot, "Alpine-Droidspaces-developers-aarch64-20260802.tar.xz"):        "Droidspaces Official（旧目录）",
 		filepath.Join(templateRoot, rootfsDroidspacesOfficialDirectory, "official.tar.xz"):          "Droidspaces Official",
-		filepath.Join(templateRoot, rootfsLinuxContainersDirectory, "linux-containers.tar.xz"):      "Linux Containers",
+		filepath.Join(templateRoot, rootfsLinuxContainersDirectory, "linux-containers.tar.xz"):      config.LinuxContainersRepositoryName,
 		filepath.Join(templateRoot, rootfsUploadsDirectory, "upload.tar.gz"):                        "本地上传",
 		filepath.Join(templateRoot, customSource.directory, "mirror.tar.gz"):                        "My Mirror",
 		filepath.Join(templateRoot, rootfsExportsDirectory, "backup.tar.gz"):                        "备份导出",
@@ -1764,8 +2001,8 @@ func TestLocalRootfsItemsSeparateStorageSources(t *testing.T) {
 	for _, item := range listBody.Items {
 		apiItemsByPath[filepath.Clean(item.Path)] = item
 	}
-	if item := apiItemsByPath[filepath.Join(templateRoot, rootfsLinuxContainersDirectory, "linux-containers.tar.xz")]; item.Source != "Linux Containers" {
-		t.Fatalf("local rootfs API source label=%q, want Linux Containers", item.Source)
+	if item := apiItemsByPath[filepath.Join(templateRoot, rootfsLinuxContainersDirectory, "linux-containers.tar.xz")]; item.Source != config.LinuxContainersRepositoryName {
+		t.Fatalf("local rootfs API source label=%q, want %q", item.Source, config.LinuxContainersRepositoryName)
 	}
 
 	uploadPath := filepath.Join(templateRoot, rootfsUploadsDirectory, "upload.tar.gz")
@@ -1792,19 +2029,24 @@ func TestRootfsTemplateStorageSourceDirectories(t *testing.T) {
 		Name: "Linux Containers mirror",
 		URL:  config.LinuxContainersRepositoryURL + "streams/v1/images.json",
 	})
-	if linuxContainers.directory != rootfsLinuxContainersDirectory || linuxContainers.label != "Linux Containers" {
-		t.Fatalf("Linux Containers storage source=%#v", linuxContainers)
+	if linuxContainers.directory != rootfsLinuxContainersDirectory || linuxContainers.label != config.LinuxContainersRepositoryName {
+		t.Fatalf("lxc-image storage source=%#v", linuxContainers)
 	}
 
 	njuMirror := rootfsTemplateStorageSourceForRepository(config.RootfsRepository{
 		Name: config.LinuxContainersNJURepositoryName,
 		URL:  config.LinuxContainersNJURepositoryURL,
 	})
-	if njuMirror.directory != rootfsLinuxContainersDirectory || njuMirror.label != "Linux Containers" {
-		t.Fatalf("Linux Containers NJU storage source=%#v", njuMirror)
+	if njuMirror.directory != rootfsLinuxContainersDirectory || njuMirror.label != config.LinuxContainersRepositoryName {
+		t.Fatalf("lxc-image NJU storage source=%#v", njuMirror)
 	}
 	if !isLinuxContainersRootfsAsset(rootfs.Asset{DownloadURL: config.LinuxContainersNJURepositoryURL + "images/debian/bookworm/arm64/cloud/rootfs.tar.xz"}) {
 		t.Fatal("NJU Linux Containers image URL should retain Linux Containers classification")
+	}
+
+	legacyNamed := rootfsTemplateStorageSourceForRepository(config.RootfsRepository{Name: "Linux Containers"})
+	if legacyNamed.directory != rootfsLinuxContainersDirectory || legacyNamed.label != config.LinuxContainersRepositoryName {
+		t.Fatalf("legacy Linux Containers storage source=%#v", legacyNamed)
 	}
 
 	first := rootfsTemplateStorageSourceForRepository(config.RootfsRepository{Name: "A source", URL: "https://mirror.example.test/rootfs.json"})
@@ -1814,6 +2056,83 @@ func TestRootfsTemplateStorageSourceDirectories(t *testing.T) {
 	}
 	if strings.ContainsAny(first.directory, "/\\ ") {
 		t.Fatalf("custom repository directory must be safe: %q", first.directory)
+	}
+}
+
+func TestLinuxContainersStorageMigratesVerifiedLegacyArchive(t *testing.T) {
+	srv, _, templateRoot := newTestServer(t)
+	asset := rootfs.Asset{
+		Name:           "Debian 14 (forky)",
+		Architecture:   rootfs.DeviceArch(),
+		Variant:        "cloud",
+		Author:         "Linux Containers",
+		SourceRepoName: config.LinuxContainersRepositoryName,
+		DownloadURL:    "https://images.linuxcontainers.org/images/debian/forky/arm64/cloud/rootfs.tar.xz",
+		SizeBytes:      int64(len("legacy-cloud-rootfs")),
+	}
+	asset.UniqueFilename = rootfs.UniqueFilename(asset)
+	legacyPath := filepath.Join(templateRoot, rootfsLinuxContainersPreviousDirectory, "cloud", asset.UniqueFilename)
+	mustWriteFile(t, legacyPath, []byte("legacy-cloud-rootfs"), 0644)
+
+	job, started, err := srv.beginSharedRootfsDownload(asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started {
+		t.Fatal("verified legacy archive should be reused without a network download")
+	}
+	<-job.done
+	if job.err != nil {
+		t.Fatal(job.err)
+	}
+	wantPath := filepath.Join(templateRoot, rootfsLinuxContainersDirectory, "cloud", asset.UniqueFilename)
+	if job.path != wantPath {
+		t.Fatalf("reused path = %q, want %q", job.path, wantPath)
+	}
+	if got := string(mustReadFile(t, wantPath)); got != "legacy-cloud-rootfs" {
+		t.Fatalf("migrated archive = %q", got)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy archive should be moved, stat err=%v", err)
+	}
+}
+
+func TestLinuxContainersStorageKeepsLegacyDirectoriesDiscoverable(t *testing.T) {
+	srv, _, templateRoot := newTestServer(t)
+	previousPath := filepath.Join(templateRoot, rootfsLinuxContainersPreviousDirectory, "cloud", "previous-cloud.tar.xz")
+	legacyPath := filepath.Join(templateRoot, rootfsLinuxContainersLegacyDir, "default", "legacy-default.tar.xz")
+	mustWriteFile(t, previousPath, []byte("previous"), 0644)
+	mustWriteFile(t, legacyPath, []byte("legacy"), 0644)
+
+	items, err := srv.localRootfsItems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := make(map[string]localRootfsItem, len(items))
+	for _, item := range items {
+		byPath[filepath.Clean(item.Path)] = item
+	}
+	for _, path := range []string{previousPath, legacyPath} {
+		item, ok := byPath[filepath.Clean(path)]
+		if !ok || item.Source != "lxc-image（旧目录）" {
+			t.Fatalf("legacy item %q = %#v, found=%v", path, item, ok)
+		}
+	}
+}
+
+func TestLinuxContainersCloudTemplatesRecognizeNewAndLegacyNamespaces(t *testing.T) {
+	for _, directory := range []string{
+		rootfsLinuxContainersDirectory,
+		rootfsLinuxContainersPreviousDirectory,
+		rootfsLinuxContainersLegacyDir,
+	} {
+		path := filepath.Join("/data/local/Droidspaces/rootfs", directory, "cloud", "debian.tar.xz")
+		if !isLinuxContainersCloudTemplate(path) {
+			t.Fatalf("cloud template in %q should be recognized", directory)
+		}
+	}
+	if isLinuxContainersCloudTemplate(filepath.Join("/data/local/Droidspaces/rootfs", rootfsLinuxContainersDirectory, "default", "debian.tar.xz")) {
+		t.Fatal("default Linux Containers template must not be treated as a cloud template")
 	}
 }
 
@@ -1855,10 +2174,10 @@ func TestLinuxContainersTemplatesAreStoredAndListedByVariant(t *testing.T) {
 	for _, item := range items {
 		byPath[filepath.Clean(item.Path)] = item
 	}
-	if item, ok := byPath[cloudPath]; !ok || item.Source != "Linux Containers" || item.Variant != "cloud" {
+	if item, ok := byPath[cloudPath]; !ok || item.Source != config.LinuxContainersRepositoryName || item.Variant != "cloud" {
 		t.Fatalf("cloud item = %#v, found=%v", item, ok)
 	}
-	if item, ok := byPath[defaultPath]; !ok || item.Source != "Linux Containers" || item.Variant != "default" {
+	if item, ok := byPath[defaultPath]; !ok || item.Source != config.LinuxContainersRepositoryName || item.Variant != "default" {
 		t.Fatalf("default item = %#v, found=%v", item, ok)
 	}
 	if _, found := byPath[filepath.Join(templateRoot, rootfsLinuxContainersDirectory, "cloud")]; found {
@@ -2206,7 +2525,7 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	// from spawning a real host policy-route monitor during the test.
 	srv.disableNATCompatRuntime = true
 	srv.configPath = filepath.Join(t.TempDir(), "webui.json")
-	if err := os.WriteFile(srv.configPath, []byte(`{"_note":"keep","defaultNatUpstreamIfname":"wlan0"}`), 0600); err != nil {
+	if err := os.WriteFile(srv.configPath, []byte(`{"_note":"keep","defaultNatUpstreamIfname":"wlan0","defaultNatUpstreamIfnames":"wlan0","natUpstreamIfname":"wlan0","natUpstreamIfnames":"wlan0"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	handler := srv.Handler()
@@ -2297,8 +2616,10 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	if persisted["_note"] != "keep" {
 		t.Fatalf("existing config keys not preserved: %#v", persisted)
 	}
-	if _, ok := persisted["defaultNatUpstreamIfname"]; ok {
-		t.Fatalf("legacy upstream field should be removed: %#v", persisted)
+	for _, key := range []string{"defaultNatUpstreamIfname", "defaultNatUpstreamIfnames", "natUpstreamIfname", "natUpstreamIfnames"} {
+		if _, ok := persisted[key]; ok {
+			t.Fatalf("legacy upstream field %q should be removed: %#v", key, persisted)
+		}
 	}
 	if persisted["mode"] != "public" || persisted["host"] != "0.0.0.0" || int(persisted["port"].(float64)) != 9191 || persisted["authToken"] != "newsecret" {
 		t.Fatalf("core settings not persisted: %#v", persisted)
@@ -2617,7 +2938,8 @@ func TestSystemSettingsPublicModeGeneratesAuthToken(t *testing.T) {
 	}
 }
 
-func TestNetworkSettingsAndAdvancedContainerConfig(t *testing.T) {
+func TestAndroidNATCreateDoesNotWriteUpstreamConfiguration(t *testing.T) {
+	t.Setenv("ANDROID_ROOT", "/system")
 	srv, workspace, templateRoot := newTestServer(t)
 	srv.configPath = filepath.Join(t.TempDir(), "webui.json")
 	archive := filepath.Join(templateRoot, "ubuntu.tar.gz")
@@ -2667,9 +2989,14 @@ func TestNetworkSettingsAndAdvancedContainerConfig(t *testing.T) {
 		t.Fatalf("unexpected create task: %#v", task)
 	}
 	configText := string(mustReadFile(t, filepath.Join(workspace, "Containers", "advanced", "container.config")))
-	for _, want := range []string{"use_sparse_image=0", "net_mode=nat", "disable_ipv6=1", "static_nat_ip=172.28.99.1", "nat_upstream_ifnames=wlan0,r_rmnet_data*", "upstream_interfaces=wlan0,r_rmnet_data*", "privileged=nomask,shared", "enable_termux_x11=0", "enable_virgl=1", "virgl_extra_flags=--renderer angle", "block_nested_ns=1"} {
+	for _, want := range []string{"use_sparse_image=0", "net_mode=nat", "disable_ipv6=1", "static_nat_ip=172.28.99.1", "privileged=nomask,shared", "enable_termux_x11=0", "enable_virgl=1", "virgl_extra_flags=--renderer angle", "block_nested_ns=1"} {
 		if !strings.Contains(configText, want) {
 			t.Fatalf("config missing %q:\n%s", want, configText)
+		}
+	}
+	for _, legacyKey := range []string{"nat_upstream_ifnames=", "upstream_interfaces="} {
+		if strings.Contains(configText, legacyKey) {
+			t.Fatalf("Android NAT create pinned an upstream with %q:\n%s", legacyKey, configText)
 		}
 	}
 	if strings.Contains(configText, "tx11_extra_flags=") {
@@ -2677,40 +3004,38 @@ func TestNetworkSettingsAndAdvancedContainerConfig(t *testing.T) {
 	}
 }
 
-func TestLinuxNATDoesNotLoadAndroidUpstreamPresets(t *testing.T) {
-	t.Setenv("ANDROID_ROOT", "")
+func TestNATConfigPatchRemovesLegacyUpstreamInterfaces(t *testing.T) {
+	t.Setenv("ANDROID_ROOT", "/system")
 	srv, workspace, _ := newTestServer(t)
+	configPath := filepath.Join(workspace, "Containers", "android-nat", "container.config")
+	mustWriteFile(t, configPath, []byte("name=android-nat\nnet_mode=nat\nnat_upstream_ifnames=wlan0,r_rmnet_data0\nupstream_interfaces=wlan0,r_rmnet_data0\n"), 0644)
 
-	if upstream, err := normalizeNATUpstreamIfnames(""); err != nil || upstream != "" {
-		t.Fatalf("Linux empty upstream = %q, %v; want automatic detection", upstream, err)
-	}
-
-	content := srv.containerConfigContent("linux-nat", "linux-nat", filepath.Join(workspace, "Containers", "linux-nat", "rootfs"), "nat", createContainerRequest{})
-	for _, key := range []string{"nat_upstream_ifnames=", "upstream_interfaces="} {
-		if strings.Contains(content, key) {
-			t.Fatalf("Linux NAT config must not pin Android upstreams %q:\n%s", key, content)
-		}
-	}
-
-	netMode := "nat"
-	updates, err := srv.containerConfigUpdates("linux-nat", updateContainerConfigRequest{NetMode: &netMode})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updates["nat_upstream_ifnames"] != "" || updates["upstream_interfaces"] != "" {
-		t.Fatalf("Linux NAT update should clear old Android upstream presets: %#v", updates)
-	}
-
-	configPath := filepath.Join(workspace, "Containers", "linux-nat", "container.config")
-	mustWriteFile(t, configPath, []byte("name=linux-nat\nnet_mode=nat\nnat_upstream_ifnames=wlan0,r_rmnet_data0\nupstream_interfaces=wlan0,r_rmnet_data0\n"), 0644)
-	if err := workspacepkg.UpdateContainerConfig(configPath, updates); err != nil {
-		t.Fatal(err)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodPatch, "/api/containers/android-nat/config?token=secret", strings.NewReader(`{"natUpstreamIfnames":"wlan0,r_rmnet_data0","natUpstreamIfname":"wlan0","hostname":"android-nat-host"}`)))
+	if res.Code != http.StatusOK {
+		t.Fatalf("config patch status=%d body=%s", res.Code, res.Body.String())
 	}
 	updated := string(mustReadFile(t, configPath))
 	if strings.Contains(updated, "upstream_interfaces=") || strings.Contains(updated, "nat_upstream_ifnames=") {
-		t.Fatalf("Linux NAT update left a fixed upstream configuration:\n%s", updated)
+		t.Fatalf("NAT config patch left a fixed upstream configuration:\n%s", updated)
 	}
+	if !strings.Contains(updated, "hostname=android-nat-host") {
+		t.Fatalf("config patch did not apply ordinary updates:\n%s", updated)
+	}
+}
 
+func TestNATNetworkSettingsReportsCoreAutoDetection(t *testing.T) {
+	t.Setenv("ANDROID_ROOT", "/system")
+	srv, workspace, _ := newTestServer(t)
+	content := srv.containerConfigContent("android-nat", "android-nat", filepath.Join(workspace, "Containers", "android-nat", "rootfs"), "nat", createContainerRequest{
+		NATUpstreamIfnames: "wlan0,r_rmnet_data0",
+		NATUpstreamIfname:  "wlan0",
+	})
+	for _, key := range []string{"nat_upstream_ifnames=", "upstream_interfaces="} {
+		if strings.Contains(content, key) {
+			t.Fatalf("Android NAT config must let the core auto-detect instead of writing %q:\n%s", key, content)
+		}
+	}
 	settings := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(settings, httptest.NewRequest(http.MethodGet, "/api/network/settings?token=secret", nil))
 	if settings.Code != http.StatusOK {
@@ -2723,22 +3048,8 @@ func TestLinuxNATDoesNotLoadAndroidUpstreamPresets(t *testing.T) {
 	if err := json.Unmarshal(settings.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.UpstreamMode != "linux-default-route" || response.AndroidNATUpstreamPresets {
-		t.Fatalf("Linux network settings = %#v", response)
-	}
-}
-
-func TestAndroidNATKeepsAndroidUpstreamPresets(t *testing.T) {
-	t.Setenv("ANDROID_ROOT", "/system")
-	upstream, err := normalizeNATUpstreamIfnames("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if upstream != defaultAndroidNATUpstreamIfnames {
-		t.Fatalf("Android empty upstream = %q, want %q", upstream, defaultAndroidNATUpstreamIfnames)
-	}
-	if natUpstreamMode() != "android-default-network" {
-		t.Fatalf("Android upstream mode = %q", natUpstreamMode())
+	if response.UpstreamMode != "core-auto-detect" || response.AndroidNATUpstreamPresets {
+		t.Fatalf("network settings = %#v", response)
 	}
 }
 

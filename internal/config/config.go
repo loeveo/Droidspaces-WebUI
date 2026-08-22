@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -68,14 +67,24 @@ type CLIOverrides struct {
 
 const OfficialRootfsRepositoryURL = "https://github.com/Droidspaces/Droidspaces-rootfs-builder/raw/refs/heads/main/rootfs.json"
 const LinuxContainersRepositoryURL = "https://images.linuxcontainers.org/"
-const LinuxContainersRepositoryName = "Linux Containers"
+const LinuxContainersRepositoryName = "lxc-image"
 const LinuxContainersNJURepositoryURL = "https://mirror.nju.edu.cn/lxc-images/"
-const LinuxContainersNJURepositoryName = "Linux Containers CN（南京大学镜像）"
+const LinuxContainersNJURepositoryName = "lxc-image CN（南京大学镜像）"
 const DefaultNATCIDR = "172.28.0.0/16"
 const DefaultNATThirdOctet = 1
 
-// DefaultRootfsRepositories returns the built-in template sources. The Linux
-// Containers endpoint publishes a SimpleStreams catalog rather than rootfs.json;
+const (
+	defaultAndroidWorkspace = "/data/local/Droidspaces"
+	defaultLinuxWorkspace   = "/var/lib/Droidspaces"
+)
+
+const (
+	legacyLinuxContainersRepositoryName    = "Linux Containers"
+	legacyLinuxContainersNJURepositoryName = "Linux Containers CN（南京大学镜像）"
+)
+
+// DefaultRootfsRepositories returns the built-in template sources. lxc-image is
+// backed by the Linux Containers SimpleStreams catalog rather than rootfs.json;
 // the WebUI rootfs client recognizes that endpoint automatically.
 func DefaultRootfsRepositories() []RootfsRepository {
 	return []RootfsRepository{
@@ -84,7 +93,7 @@ func DefaultRootfsRepositories() []RootfsRepository {
 	}
 }
 
-// EnsureDefaultRootfsRepositories keeps the Linux Containers catalog available
+// EnsureDefaultRootfsRepositories keeps the managed lxc-image catalog available
 // for old webui.json files that were created before it became a built-in source.
 // It also consolidates the legacy official-plus-CN pair into one selected source.
 func EnsureDefaultRootfsRepositories(repositories []RootfsRepository) []RootfsRepository {
@@ -103,8 +112,8 @@ func EnsureDefaultRootfsRepositories(repositories []RootfsRepository) []RootfsRe
 	return append(result, RootfsRepository{Name: LinuxContainersRepositoryName, URL: LinuxContainersRepositoryURL})
 }
 
-// IsLinuxContainersRepositoryURL identifies the managed Linux Containers
-// repository roots accepted by the WebUI. It deliberately does not match an
+// IsLinuxContainersRepositoryURL identifies the managed lxc-image repository
+// roots accepted by the WebUI. It deliberately does not match an
 // arbitrary images.linuxcontainers.org URL so user-defined repositories retain
 // their original behavior.
 func IsLinuxContainersRepositoryURL(value string) bool {
@@ -113,9 +122,9 @@ func IsLinuxContainersRepositoryURL(value string) bool {
 	return value == canonical || value == canonical+"/streams/v1/images.json" || IsLinuxContainersNJURepositoryURL(value)
 }
 
-// NormalizeLinuxContainersRepositories keeps the selected Linux Containers
-// origin as one repository. It migrates the old add-only CN setting by folding
-// an official-plus-NJU pair into the first Linux Containers position while
+// NormalizeLinuxContainersRepositories keeps the selected lxc-image origin as
+// one repository. It migrates the old add-only CN setting by folding an
+// official-plus-NJU pair into the first lxc-image position while
 // preserving all unrelated repositories and their order.
 func NormalizeLinuxContainersRepositories(repositories []RootfsRepository) []RootfsRepository {
 	selectedURL := ""
@@ -150,8 +159,19 @@ func NormalizeLinuxContainersRepositories(repositories []RootfsRepository) []Roo
 	return result
 }
 
+// IsLinuxContainersRepositoryName recognizes the current lxc-image name and
+// names emitted by earlier WebUI versions. URL detection remains authoritative
+// for repository configuration; this helper preserves local asset compatibility.
+func IsLinuxContainersRepositoryName(value string) bool {
+	value = strings.TrimSpace(value)
+	return strings.EqualFold(value, LinuxContainersRepositoryName) ||
+		strings.EqualFold(value, LinuxContainersNJURepositoryName) ||
+		strings.EqualFold(value, legacyLinuxContainersRepositoryName) ||
+		strings.EqualFold(value, legacyLinuxContainersNJURepositoryName)
+}
+
 // IsLinuxContainersNJURepositoryURL recognizes only the supported Nanjing
-// University Linux Containers mirror root. Keeping the match exact prevents a
+// University lxc-image mirror root. Keeping the match exact prevents a
 // user-provided catalog path or lookalike host from rewriting downloads to an
 // unintended origin.
 func IsLinuxContainersNJURepositoryURL(value string) bool {
@@ -166,42 +186,23 @@ func IsLinuxContainersNJURepositoryURL(value string) bool {
 }
 
 func DefaultPath() string {
-	if IsAndroid() {
-		return "/data/local/Droidspaces/webui.json"
-	}
-	return "/var/lib/Droidspaces/webui.json"
+	return filepath.Join(defaultWorkspace(IsAndroid()), "webui.json")
 }
 
 func Default() Config {
-	workspace := "/var/lib/Droidspaces"
-	if IsAndroid() {
-		workspace = "/data/local/Droidspaces"
-	}
-
-	path := ""
-	if found, err := exec.LookPath("droidspaces"); err == nil {
-		path = found
-	} else if IsAndroid() {
-		path = filepath.Join(workspace, "bin", "droidspaces")
-	} else {
-		path = "../output/droidspaces"
-	}
-
-	corePath := filepath.Dir(path)
-	imageRoot := corePath
-	templateRoot := filepath.Join(corePath, "templates")
-	socketdEnabled := IsAndroid()
-	if IsAndroid() {
-		templateRoot = filepath.Join(workspace, "rootfs")
-	}
+	android := IsAndroid()
+	workspace, corePath, path, templateRoot := defaultPathLayout(android)
+	socketdEnabled := android
 
 	return Config{
-		Mode:                     ModeLocal,
-		Host:                     "127.0.0.1",
-		Port:                     9090,
-		DroidspacesPath:          path,
-		CorePath:                 corePath,
-		ImageRoot:                imageRoot,
+		Mode:            ModeLocal,
+		Host:            "127.0.0.1",
+		Port:            9090,
+		DroidspacesPath: path,
+		CorePath:        corePath,
+		// imageRoot remains readable for old configurations and API clients. New
+		// installs keep it aligned with the actual template storage root.
+		ImageRoot:                templateRoot,
 		TemplateImageRoot:        templateRoot,
 		Workspace:                workspace,
 		SocketdEnabled:           &socketdEnabled,
@@ -216,6 +217,24 @@ func Default() Config {
 		OverviewRefreshSecs:      3,
 		RootfsRepositories:       DefaultRootfsRepositories(),
 	}
+}
+
+func defaultWorkspace(android bool) string {
+	if android {
+		return defaultAndroidWorkspace
+	}
+	return defaultLinuxWorkspace
+}
+
+// defaultPathLayout keeps the canonical files below the workspace. Binaries
+// may additionally be exposed through /usr/sbin symlinks on Linux, but the
+// WebUI must retain the canonical directory for its Core path and diagnostics.
+func defaultPathLayout(android bool) (workspace, corePath, droidspacesPath, templateRoot string) {
+	workspace = defaultWorkspace(android)
+	corePath = filepath.Join(workspace, "bin")
+	droidspacesPath = filepath.Join(corePath, "droidspaces")
+	templateRoot = filepath.Join(workspace, "rootfs")
+	return workspace, corePath, droidspacesPath, templateRoot
 }
 
 func Load(path string, overrides CLIOverrides) (Config, string, error) {
@@ -511,17 +530,20 @@ func normalize(cfg *Config) error {
 	if cfg.Port <= 0 || cfg.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
+	if cfg.Workspace == "" {
+		cfg.Workspace = defaultWorkspace(IsAndroid())
+	}
 	if cfg.DroidspacesPath == "" {
 		return fmt.Errorf("droidspacesPath is required")
 	}
 	if cfg.CorePath == "" {
 		cfg.CorePath = filepath.Dir(cfg.DroidspacesPath)
 	}
-	if cfg.ImageRoot == "" {
-		cfg.ImageRoot = cfg.CorePath
-	}
 	if cfg.TemplateImageRoot == "" {
-		cfg.TemplateImageRoot = filepath.Join(cfg.ImageRoot, "templates")
+		cfg.TemplateImageRoot = filepath.Join(cfg.Workspace, "rootfs")
+	}
+	if cfg.ImageRoot == "" {
+		cfg.ImageRoot = cfg.TemplateImageRoot
 	}
 	cfg.RootfsRepositories = EnsureDefaultRootfsRepositories(cfg.RootfsRepositories)
 	cfg.DefaultNATCIDR = strings.TrimSpace(cfg.DefaultNATCIDR)
@@ -557,13 +579,6 @@ func normalize(cfg *Config) error {
 	}
 	if cfg.BatteryStatsWriteMins < 5 || cfg.BatteryStatsWriteMins > 1440 {
 		return fmt.Errorf("batteryStatsWriteMinutes must be between 5 and 1440")
-	}
-	if cfg.Workspace == "" {
-		if IsAndroid() {
-			cfg.Workspace = "/data/local/Droidspaces"
-		} else {
-			cfg.Workspace = "/var/lib/Droidspaces"
-		}
 	}
 	if cfg.SocketdEnabled == nil {
 		socketdEnabled := IsAndroid()

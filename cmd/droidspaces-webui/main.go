@@ -27,9 +27,9 @@ func main() {
 	droidspaces := flag.String("droidspaces", "", "path to the droidspaces binary")
 	token := flag.String("auth-token", "", "optional bearer token for API access")
 	workspace := flag.String("workspace", "", "Droidspaces workspace path")
-	corePath := flag.String("core-path", "", "Droidspaces core directory")
-	imageRoot := flag.String("image-root", "", "root directory for container images")
-	templateRoot := flag.String("template-image-root", "", "directory for template images")
+	corePath := flag.String("core-path", "", "Droidspaces core binary directory")
+	imageRoot := flag.String("image-root", "", "legacy rootfs scan directory (compatibility field)")
+	templateRoot := flag.String("template-image-root", "", "directory for reusable rootfs templates")
 	socketdEnabled := flag.Bool("socketd-enabled", true, "enable socketd backend")
 	flag.Parse()
 

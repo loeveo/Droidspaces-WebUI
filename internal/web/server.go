@@ -70,6 +70,10 @@ type Server struct {
 	rootfsClient                        *rootfs.Client
 	rootfsSkipTLSVerify                 bool
 	rootfsCacheMu                       sync.RWMutex
+	rootfsCatalogRefreshMu              sync.Mutex
+	rootfsCatalogRefreshCancel          context.CancelFunc
+	rootfsCatalogRefreshDone            chan struct{}
+	disableRootfsCatalogRefresh         bool
 	rootfsDownloadMu                    sync.Mutex
 	rootfsDownloads                     map[string]*sharedRootfsDownload
 	rootfsDownloadRequests              map[string]*rootfsDownloadRequestFlight
@@ -127,33 +131,34 @@ type Server struct {
 }
 
 type Options struct {
-	DroidspacesPath          string
-	WebVersion               string
-	SupportedCoreVersion     string
-	AuthToken                string
-	Workspace                string
-	ConfigPath               string
-	Mode                     string
-	Host                     string
-	Port                     int
-	CorePath                 string
-	ImageRoot                string
-	TemplateImageRoot        string
-	RootfsRepos              []config.RootfsRepository
-	RootfsSkipTLSVerify      bool
-	DefaultNATCIDR           string
-	DefaultNATThirdOctet     int
-	NestedAndroidNATCompat   bool
-	BatteryDirectPower       bool
-	BatterySeriesCells       int
-	OverviewPowerEnabled     *bool
-	BatteryMonitoringEnabled *bool
-	BatteryDetailEnabled     *bool
-	BatteryStatsSampleSecs   int
-	BatteryStatsWriteMins    int
-	OverviewRefreshSecs      int
-	SocketdEnabled           bool
-	DisableBatterySampler    bool
+	DroidspacesPath             string
+	WebVersion                  string
+	SupportedCoreVersion        string
+	AuthToken                   string
+	Workspace                   string
+	ConfigPath                  string
+	Mode                        string
+	Host                        string
+	Port                        int
+	CorePath                    string
+	ImageRoot                   string
+	TemplateImageRoot           string
+	RootfsRepos                 []config.RootfsRepository
+	RootfsSkipTLSVerify         bool
+	DefaultNATCIDR              string
+	DefaultNATThirdOctet        int
+	NestedAndroidNATCompat      bool
+	BatteryDirectPower          bool
+	BatterySeriesCells          int
+	OverviewPowerEnabled        *bool
+	BatteryMonitoringEnabled    *bool
+	BatteryDetailEnabled        *bool
+	BatteryStatsSampleSecs      int
+	BatteryStatsWriteMins       int
+	OverviewRefreshSecs         int
+	SocketdEnabled              bool
+	DisableBatterySampler       bool
+	DisableRootfsCatalogRefresh bool
 }
 
 type apiError struct {
@@ -380,15 +385,16 @@ type localRootfsStorageSource struct {
 }
 
 const (
-	rootfsDroidspacesOfficialDirectory = "droidspaces-official"
-	rootfsLinuxContainersDirectory     = "images.linuxcontainers.org"
-	rootfsLinuxContainersLegacyDir     = "linux-containers"
-	rootfsUploadsDirectory             = "uploads"
-	rootfsExportsDirectory             = "exports"
-	rootfsRepositoryDirectoryPrefix    = "repository-"
-	maxCloudInitDocumentBytes          = 64 << 10
-	cloudInitNATPrefix                 = 16
-	cloudInitNATGateway                = "172.28.0.1"
+	rootfsDroidspacesOfficialDirectory     = "droidspaces-official"
+	rootfsLinuxContainersDirectory         = "lxc-image"
+	rootfsLinuxContainersPreviousDirectory = "images.linuxcontainers.org"
+	rootfsLinuxContainersLegacyDir         = "linux-containers"
+	rootfsUploadsDirectory                 = "uploads"
+	rootfsExportsDirectory                 = "exports"
+	rootfsRepositoryDirectoryPrefix        = "repository-"
+	maxCloudInitDocumentBytes              = 64 << 10
+	cloudInitNATPrefix                     = 16
+	cloudInitNATGateway                    = "172.28.0.1"
 )
 
 var rootfsStorageComponentUnsafe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -742,11 +748,6 @@ type batteryStatsCheckpoint struct {
 	CheckpointSampleTime int64              `json:"checkpointSampleTime"`
 }
 
-// defaultAndroidNATUpstreamIfnames preserves the manual upstream priority used
-// on Android hosts. A configured upstream_interfaces value disables the core's
-// automatic uplink detection, so it must never be used as a Linux default.
-const defaultAndroidNATUpstreamIfnames = "wlan0,r_rmnet_data0,r_rmnet_data1,r_rmnet_data2,rmnet0,ccmni0,ccmni1,v4-ccmni0,v4-ccmni1"
-
 const defaultContainerCgroupRoot = "/sys/fs/cgroup/droidspaces"
 
 var powerSupplyRoot = "/sys/class/power_supply"
@@ -784,11 +785,14 @@ const (
 var maxRootfsUploadBytes int64 = 16 << 30
 
 type containerMemoryUsage struct {
-	UsedKB     int64    `json:"usedKb"`
-	TotalKB    int64    `json:"totalKb,omitempty"`
-	UsedBytes  int64    `json:"usedBytes"`
-	TotalBytes int64    `json:"totalBytes,omitempty"`
-	Percent    *float64 `json:"percent,omitempty"`
+	UsedKB      int64    `json:"usedKb"`
+	TotalKB     int64    `json:"totalKb,omitempty"`
+	UsedBytes   int64    `json:"usedBytes"`
+	TotalBytes  int64    `json:"totalBytes,omitempty"`
+	Percent     *float64 `json:"percent,omitempty"`
+	AnonBytes   *int64   `json:"anonBytes,omitempty"`
+	FileBytes   *int64   `json:"fileBytes,omitempty"`
+	KernelBytes *int64   `json:"kernelBytes,omitempty"`
 }
 
 // containerDiskUsage matches the Android app's sparse-image measurement:
@@ -827,17 +831,21 @@ type containerView struct {
 	MemoryPercent     *float64              `json:"memoryPercent,omitempty"`
 	Uptime            string                `json:"uptime,omitempty"`
 	MemoryUsage       *containerMemoryUsage `json:"memoryUsage,omitempty"`
+	MemoryUsageSource string                `json:"memoryUsageSource,omitempty"`
+	CgroupMemoryUsage *containerMemoryUsage `json:"cgroupMemoryUsage,omitempty"`
 	DiskUsage         *containerDiskUsage   `json:"diskUsage,omitempty"`
 	UseSparseImage    bool                  `json:"useSparseImage"`
 }
 
 type containerUsageSnapshot struct {
-	CPUUsage    *float64
-	RAMUsedKB   *int64
-	RAMTotalKB  *int64
-	RAMPercent  *float64
-	MemoryUsage *containerMemoryUsage
-	Uptime      string
+	CPUUsage          *float64
+	RAMUsedKB         *int64
+	RAMTotalKB        *int64
+	RAMPercent        *float64
+	MemoryUsage       *containerMemoryUsage
+	MemoryUsageSource string
+	CgroupMemoryUsage *containerMemoryUsage
+	Uptime            string
 }
 
 func newInspectResponse(inspect socketd.Inspect, source string) inspectResponse {
@@ -907,9 +915,25 @@ func (resp inspectResponse) toSocketdInspect() socketd.Inspect {
 }
 
 func NewServer(opts Options) (*Server, error) {
-	path := opts.DroidspacesPath
+	workspace := strings.TrimSpace(opts.Workspace)
+	if workspace == "" {
+		workspace = config.Default().Workspace
+	}
+	path := strings.TrimSpace(opts.DroidspacesPath)
 	if path == "" {
-		path = "../output/droidspaces"
+		path = filepath.Join(workspace, "bin", "droidspaces")
+	}
+	corePath := strings.TrimSpace(opts.CorePath)
+	if corePath == "" {
+		corePath = filepath.Dir(path)
+	}
+	templateImageRoot := strings.TrimSpace(opts.TemplateImageRoot)
+	if templateImageRoot == "" {
+		templateImageRoot = filepath.Join(workspace, "rootfs")
+	}
+	imageRoot := strings.TrimSpace(opts.ImageRoot)
+	if imageRoot == "" {
+		imageRoot = templateImageRoot
 	}
 	webVersion := strings.TrimSpace(opts.WebVersion)
 	if webVersion == "" {
@@ -920,10 +944,6 @@ func NewServer(opts Options) (*Server, error) {
 		supportedCoreVersion = DefaultSupportedCoreVersion
 	}
 
-	workspace := opts.Workspace
-	if workspace == "" {
-		workspace = "/var/lib/Droidspaces"
-	}
 	defaultNATCIDR := strings.TrimSpace(opts.DefaultNATCIDR)
 	if defaultNATCIDR == "" {
 		defaultNATCIDR = config.DefaultNATCIDR
@@ -987,50 +1007,52 @@ func NewServer(opts Options) (*Server, error) {
 	configuredBatterySeriesCells = opts.BatterySeriesCells
 
 	srv := &Server{
-		socketd:                  socketd.NewClient(6 * time.Second),
-		coreUpdateHTTPClient:     newCoreUpdateHTTPClient(),
-		socketdEnabled:           opts.SocketdEnabled,
-		droidspacesPath:          path,
-		webVersion:               webVersion,
-		supportedCoreVersion:     supportedCoreVersion,
-		authToken:                opts.AuthToken,
-		workspace:                workspace,
-		configPath:               opts.ConfigPath,
-		mode:                     mode,
-		host:                     host,
-		port:                     port,
-		corePath:                 opts.CorePath,
-		imageRoot:                opts.ImageRoot,
-		templateImageRoot:        opts.TemplateImageRoot,
-		rootfsRepos:              config.EnsureDefaultRootfsRepositories(opts.RootfsRepos),
-		rootfsClient:             rootfs.NewClient(opts.RootfsSkipTLSVerify),
-		rootfsSkipTLSVerify:      opts.RootfsSkipTLSVerify,
-		cgroupRoot:               defaultContainerCgroupRoot,
-		defaultNATCIDR:           defaultNATCIDR,
-		defaultNATThirdOctet:     defaultNATThirdOctet,
-		nestedAndroidNATCompat:   opts.NestedAndroidNATCompat,
-		nestedAndroidNATScope:    nestedAndroidNATScopeForWorkspace(workspace),
-		batteryDirectPower:       opts.BatteryDirectPower,
-		batterySeriesCells:       opts.BatterySeriesCells,
-		overviewPowerEnabled:     overviewPowerEnabled,
-		batteryMonitoringEnabled: batteryMonitoringEnabled,
-		batteryDetailEnabled:     batteryDetailEnabled,
-		batteryStatsSampleSecs:   int64(batteryStatsSampleSecs),
-		batteryStatsWriteMins:    int64(batteryStatsWriteMins),
-		overviewRefreshSecs:      overviewRefreshSecs,
-		disableBatterySampler:    opts.DisableBatterySampler,
-		natIPReservations:        map[string]string{},
-		portForwardReservations:  map[string][]socketd.Port{},
-		containerDistroCache:     map[string]containerDistroCacheEntry{},
-		tasks:                    map[string]*taskState{},
-		containerTasks:           map[string]string{},
-		rootfsDownloads:          map[string]*sharedRootfsDownload{},
-		rootfsDownloadRequests:   map[string]*rootfsDownloadRequestFlight{},
+		socketd:                     socketd.NewClient(6 * time.Second),
+		coreUpdateHTTPClient:        newCoreUpdateHTTPClient(),
+		socketdEnabled:              opts.SocketdEnabled,
+		droidspacesPath:             path,
+		webVersion:                  webVersion,
+		supportedCoreVersion:        supportedCoreVersion,
+		authToken:                   opts.AuthToken,
+		workspace:                   workspace,
+		configPath:                  opts.ConfigPath,
+		mode:                        mode,
+		host:                        host,
+		port:                        port,
+		corePath:                    corePath,
+		imageRoot:                   imageRoot,
+		templateImageRoot:           templateImageRoot,
+		rootfsRepos:                 config.EnsureDefaultRootfsRepositories(opts.RootfsRepos),
+		rootfsClient:                rootfs.NewClient(opts.RootfsSkipTLSVerify),
+		rootfsSkipTLSVerify:         opts.RootfsSkipTLSVerify,
+		cgroupRoot:                  defaultContainerCgroupRoot,
+		defaultNATCIDR:              defaultNATCIDR,
+		defaultNATThirdOctet:        defaultNATThirdOctet,
+		nestedAndroidNATCompat:      opts.NestedAndroidNATCompat,
+		nestedAndroidNATScope:       nestedAndroidNATScopeForWorkspace(workspace),
+		batteryDirectPower:          opts.BatteryDirectPower,
+		batterySeriesCells:          opts.BatterySeriesCells,
+		overviewPowerEnabled:        overviewPowerEnabled,
+		batteryMonitoringEnabled:    batteryMonitoringEnabled,
+		batteryDetailEnabled:        batteryDetailEnabled,
+		batteryStatsSampleSecs:      int64(batteryStatsSampleSecs),
+		batteryStatsWriteMins:       int64(batteryStatsWriteMins),
+		overviewRefreshSecs:         overviewRefreshSecs,
+		disableBatterySampler:       opts.DisableBatterySampler,
+		disableRootfsCatalogRefresh: opts.DisableRootfsCatalogRefresh,
+		natIPReservations:           map[string]string{},
+		portForwardReservations:     map[string][]socketd.Port{},
+		containerDistroCache:        map[string]containerDistroCacheEntry{},
+		tasks:                       map[string]*taskState{},
+		containerTasks:              map[string]string{},
+		rootfsDownloads:             map[string]*sharedRootfsDownload{},
+		rootfsDownloadRequests:      map[string]*rootfsDownloadRequestFlight{},
 	}
 	if !opts.DisableBatterySampler && batteryMonitoringEnabled {
 		srv.startBatteryStatsSampler()
 	}
 	srv.startNestedAndroidNATCompatMonitor()
+	srv.startRootfsCatalogRefreshScheduler()
 	return srv, nil
 }
 
@@ -1897,6 +1919,9 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			data["overviewRefreshSeconds"] = settings.OverviewRefreshSecs
 			data["rootfsRepositories"] = settings.RootfsRepositories
 			delete(data, "defaultNatUpstreamIfname")
+			delete(data, "defaultNatUpstreamIfnames")
+			delete(data, "natUpstreamIfname")
+			delete(data, "natUpstreamIfnames")
 		}); err != nil {
 			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 			return
@@ -2018,23 +2043,23 @@ func (s *Server) normalizeSystemSettings(req systemSettingsRequest) (normalizedS
 		"templateImageRoot": strings.TrimSpace(req.TemplateImageRoot),
 		"workspace":         strings.TrimSpace(req.Workspace),
 	}
+	if paths["workspace"] == "" {
+		paths["workspace"] = strings.TrimSpace(s.workspace)
+		if paths["workspace"] == "" {
+			paths["workspace"] = config.Default().Workspace
+		}
+	}
 	if paths["droidspacesPath"] == "" {
-		return normalizedSystemSettings{}, fmt.Errorf("droidspacesPath is required")
+		paths["droidspacesPath"] = filepath.Join(paths["workspace"], "bin", "droidspaces")
 	}
 	if paths["corePath"] == "" {
 		paths["corePath"] = filepath.Dir(paths["droidspacesPath"])
 	}
-	if paths["imageRoot"] == "" {
-		paths["imageRoot"] = paths["corePath"]
-	}
 	if paths["templateImageRoot"] == "" {
-		paths["templateImageRoot"] = filepath.Join(paths["imageRoot"], "templates")
+		paths["templateImageRoot"] = filepath.Join(paths["workspace"], "rootfs")
 	}
-	if paths["workspace"] == "" {
-		paths["workspace"] = s.workspace
-		if paths["workspace"] == "" {
-			paths["workspace"] = "/var/lib/Droidspaces"
-		}
+	if paths["imageRoot"] == "" {
+		paths["imageRoot"] = paths["templateImageRoot"]
 	}
 	for key, value := range paths {
 		if hasConfigUnsafeChars(value) {
@@ -2179,10 +2204,12 @@ func (s *Server) systemSettingsResponse(saved bool, restartRequired bool) map[st
 		"batteryStatsWriteMinutes":    s.batteryStatsWriteMinutes(),
 		"overviewRefreshSeconds":      s.overviewRefreshSecs,
 		"natGatewayIP":                "172.28.0.1",
-		"upstreamMode":                natUpstreamMode(),
-		"androidNATUpstreamPresets":   config.IsAndroid(),
-		"rootfsRepositories":          s.rootfsRepos,
-		"integration":                 s.diagnosticsSettings(),
+		// Droidspaces v6.5 detects the uplink itself. Retain these fields for
+		// clients from earlier WebUI versions, but no longer expose a preset.
+		"upstreamMode":              "core-auto-detect",
+		"androidNATUpstreamPresets": false,
+		"rootfsRepositories":        s.rootfsRepos,
+		"integration":               s.diagnosticsSettings(),
 	}
 }
 
@@ -2552,6 +2579,11 @@ func (s *Server) beginSharedRootfsDownloadWithTask(asset rootfs.Asset, requested
 		}
 	}
 	completedPath := filepath.Join(downloadRoot, asset.UniqueFilename)
+	migratedLegacyArchive, err := migrateLegacyLinuxContainersArchive(templateImageRoot, storage, asset, completedPath)
+	if err != nil {
+		s.rootfsDownloadMu.Unlock()
+		return nil, false, err
+	}
 	if rootfsArchiveMatchesAsset(completedPath, asset) {
 		taskID := requestedTaskID
 		if taskID == "" {
@@ -2572,6 +2604,9 @@ func (s *Server) beginSharedRootfsDownloadWithTask(asset rootfs.Asset, requested
 			t.Status = "running"
 			t.Total = asset.SizeBytes
 		})
+		if migratedLegacyArchive {
+			s.appendTaskLog(taskID, "Moved a verified legacy rootfs into lxc-image template storage.")
+		}
 		s.appendTaskLog(taskID, "Reusing the completed cloud rootfs already in template storage.")
 		s.completeTask(taskID, completedPath, "/api/rootfs/local/download?path="+url.QueryEscape(completedPath))
 		close(job.done)
@@ -2612,6 +2647,38 @@ func rootfsArchiveMatchesAsset(path string, asset rootfs.Asset) bool {
 		return false
 	}
 	return asset.SizeBytes <= 0 || info.Size() == asset.SizeBytes
+}
+
+// migrateLegacyLinuxContainersArchive preserves existing downloads while the
+// Linux Containers namespace moves from its host-name directory to lxc-image.
+// Only a complete archive that matches the selected asset is moved.
+func migrateLegacyLinuxContainersArchive(templateImageRoot string, storage localRootfsStorageSource, asset rootfs.Asset, destination string) (bool, error) {
+	if storage.directory != rootfsLinuxContainersDirectory || rootfsArchiveMatchesAsset(destination, asset) {
+		return false, nil
+	}
+
+	filename := rootfsDownloadFilename(asset)
+	variant := rootfsAssetStorageVariant(asset)
+	legacyDirectories := []string{
+		filepath.Join(rootfsLinuxContainersPreviousDirectory, variant),
+		rootfsLinuxContainersPreviousDirectory,
+		filepath.Join(rootfsLinuxContainersLegacyDir, variant),
+		rootfsLinuxContainersLegacyDir,
+	}
+	for _, directory := range legacyDirectories {
+		legacyPath := filepath.Join(templateImageRoot, directory, filename)
+		if !rootfsArchiveMatchesAsset(legacyPath, asset) {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+			return false, err
+		}
+		if err := os.Rename(legacyPath, destination); err != nil {
+			return false, fmt.Errorf("move legacy Linux Containers rootfs into lxc-image storage: %w", err)
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func rootfsDownloadedArchiveIsReusable(job *sharedRootfsDownload) bool {
@@ -2691,7 +2758,7 @@ func (s *Server) waitForSharedRootfsDownload(ctx context.Context, job *sharedRoo
 func (s *Server) handleNetworkSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"defaultNatCIDR": s.defaultNATCIDR, "defaultNatThirdOctet": s.defaultNATThirdOctet, "natGatewayIP": "172.28.0.1", "upstreamMode": natUpstreamMode(), "androidNATUpstreamPresets": config.IsAndroid()})
+		writeJSON(w, http.StatusOK, map[string]any{"defaultNatCIDR": s.defaultNATCIDR, "defaultNatThirdOctet": s.defaultNATThirdOctet, "natGatewayIP": "172.28.0.1", "upstreamMode": "core-auto-detect", "androidNATUpstreamPresets": false})
 	case http.MethodPut, http.MethodPost:
 		var req networkSettingsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2721,13 +2788,16 @@ func (s *Server) handleNetworkSettings(w http.ResponseWriter, r *http.Request) {
 			data["defaultNatCIDR"] = cidr
 			data["defaultNatThirdOctet"] = natThirdOctet
 			delete(data, "defaultNatUpstreamIfname")
+			delete(data, "defaultNatUpstreamIfnames")
+			delete(data, "natUpstreamIfname")
+			delete(data, "natUpstreamIfnames")
 		}); err != nil {
 			writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
 			return
 		}
 		s.defaultNATCIDR = cidr
 		s.defaultNATThirdOctet = natThirdOctet
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "defaultNatCIDR": cidr, "defaultNatThirdOctet": natThirdOctet, "natGatewayIP": "172.28.0.1", "upstreamMode": natUpstreamMode(), "androidNATUpstreamPresets": config.IsAndroid()})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "defaultNatCIDR": cidr, "defaultNatThirdOctet": natThirdOctet, "natGatewayIP": "172.28.0.1", "upstreamMode": "core-auto-detect", "androidNATUpstreamPresets": false})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
 	}
@@ -3788,6 +3858,10 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.NetMode = netMode
+	// The core detects the NAT uplink since v6.5. Keep accepting these legacy
+	// fields so older clients can create containers, but never persist them.
+	req.NATUpstreamIfnames = ""
+	req.NATUpstreamIfname = ""
 	if netModeForcesDisableIPv6(req.NetMode) {
 		req.DisableIPv6 = true
 	}
@@ -4164,7 +4238,13 @@ func (s *Server) updateContainerConfig(w http.ResponseWriter, r *http.Request, t
 }
 
 func (s *Server) containerConfigUpdates(target string, req updateContainerConfigRequest) (map[string]string, error) {
-	updates := map[string]string{}
+	// A configured uplink bypasses the core's automatic NAT detection. Every
+	// config write clears old WebUI-generated values, including requests from
+	// older clients that still send either legacy JSON field.
+	updates := map[string]string{
+		"nat_upstream_ifnames": "",
+		"upstream_interfaces":  "",
+	}
 	requestedNetMode := ""
 	addString := func(key string, value *string) error {
 		if value == nil {
@@ -4212,14 +4292,6 @@ func (s *Server) containerConfigUpdates(target string, req updateContainerConfig
 		}
 		updates["static_nat_ip"] = staticIP
 	}
-	if req.NATUpstreamIfnames != nil || req.NATUpstreamIfname != nil {
-		upstream, err := normalizeNATUpstreamIfnames(firstNonEmptyPtr(req.NATUpstreamIfnames, req.NATUpstreamIfname))
-		if err != nil {
-			return nil, err
-		}
-		updates["nat_upstream_ifnames"] = upstream
-		updates["upstream_interfaces"] = upstream
-	}
 	if req.PrivilegedMode != nil {
 		privileged, err := normalizePrivilegedMode(*req.PrivilegedMode)
 		if err != nil {
@@ -4239,17 +4311,6 @@ func (s *Server) containerConfigUpdates(target string, req updateContainerConfig
 		if req.StaticNATIP == nil {
 			updates["static_nat_ip"] = ""
 		}
-		if req.NATUpstreamIfnames == nil && req.NATUpstreamIfname == nil {
-			updates["nat_upstream_ifnames"] = ""
-			updates["upstream_interfaces"] = ""
-		}
-	}
-	if requestedNetMode == "nat" && req.NATUpstreamIfnames == nil && req.NATUpstreamIfname == nil {
-		// Existing Linux configurations may contain old Android-only presets.
-		// Clearing them lets the core follow the Linux main-table default route.
-		upstream := defaultNATUpstreamIfnames()
-		updates["nat_upstream_ifnames"] = upstream
-		updates["upstream_interfaces"] = upstream
 	}
 	if req.Env != nil {
 		if strings.ContainsAny(*req.Env, "\x00\r") || len(*req.Env) > 1<<20 {
@@ -5224,7 +5285,10 @@ func (view *containerView) applyUsage(usage containerUsageSnapshot) {
 	if usage.Uptime != "" {
 		view.Uptime = usage.Uptime
 	}
-	if view.RAMUsedKB != nil || view.RAMTotalKB != nil || view.RAMPercent != nil {
+	if usage.MemoryUsageSource != "" {
+		view.MemoryUsageSource = usage.MemoryUsageSource
+	}
+	if usage.MemoryUsage == nil && (view.RAMUsedKB != nil || view.RAMTotalKB != nil || view.RAMPercent != nil) {
 		memory := &containerMemoryUsage{}
 		if view.RAMUsedKB != nil {
 			memory.UsedKB = *view.RAMUsedKB
@@ -5241,12 +5305,10 @@ func (view *containerView) applyUsage(usage containerUsageSnapshot) {
 		view.MemoryUsage = memory
 	}
 	if usage.MemoryUsage != nil {
-		memory := *usage.MemoryUsage
-		if usage.MemoryUsage.Percent != nil {
-			percent := *usage.MemoryUsage.Percent
-			memory.Percent = &percent
-		}
-		view.MemoryUsage = &memory
+		view.MemoryUsage = cloneContainerMemoryUsage(usage.MemoryUsage)
+	}
+	if usage.CgroupMemoryUsage != nil {
+		view.CgroupMemoryUsage = cloneContainerMemoryUsage(usage.CgroupMemoryUsage)
 	}
 }
 
@@ -5264,14 +5326,15 @@ func (s *Server) collectContainerUsage(ctx context.Context, name string) (contai
 				out.CPUUsage = &value
 			}
 		}
-		if cgroupMemory == nil {
-			// The core's RAM_USED_KB is a PID-namespace process sum and remains
-			// useful when the host does not expose a v2 cgroup. Do not use its
-			// RAM_TOTAL_KB: that value is always the host's MemTotal.
-			if raw := kv["RAM_USED_KB"]; raw != "" {
-				if value, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil && value >= 0 {
-					out.RAMUsedKB = &value
-				}
+		// RAM_USED_KB is the PID-namespace VmRSS sum used by the official
+		// Android app. Unlike cgroup memory.current, it excludes file cache and
+		// most kernel accounting. RAM_TOTAL_KB is host MemTotal and must never
+		// be presented as a container limit.
+		if raw := kv["RAM_USED_KB"]; raw != "" {
+			if value, convErr := strconv.ParseInt(raw, 10, 64); convErr == nil && value >= 0 {
+				out.RAMUsedKB = &value
+				out.MemoryUsage = memoryUsageFromKB(value)
+				out.MemoryUsageSource = "core-rss"
 			}
 		}
 		if raw := kv["UPTIME"]; raw != "" && raw != "NONE" {
@@ -5279,15 +5342,21 @@ func (s *Server) collectContainerUsage(ctx context.Context, name string) (contai
 		}
 	}
 	if cgroupMemory != nil {
-		out.MemoryUsage = cgroupMemory
-		usedKB := cgroupMemory.UsedBytes / 1024
-		out.RAMUsedKB = &usedKB
-		if cgroupMemory.TotalBytes > 0 {
-			totalKB := cgroupMemory.TotalBytes / 1024
-			out.RAMTotalKB = &totalKB
-			if cgroupMemory.Percent != nil {
-				percent := *cgroupMemory.Percent
-				out.RAMPercent = &percent
+		out.CgroupMemoryUsage = cgroupMemory
+		if out.MemoryUsage == nil {
+			// Keep a usable value when the core usage command is unavailable, but
+			// mark it so clients do not mistake cgroup accounting for process RSS.
+			out.MemoryUsage = cgroupMemory
+			out.MemoryUsageSource = "cgroup-memory.current"
+			usedKB := cgroupMemory.UsedBytes / 1024
+			out.RAMUsedKB = &usedKB
+			if cgroupMemory.TotalBytes > 0 {
+				totalKB := cgroupMemory.TotalBytes / 1024
+				out.RAMTotalKB = &totalKB
+				if cgroupMemory.Percent != nil {
+					percent := *cgroupMemory.Percent
+					out.RAMPercent = &percent
+				}
 			}
 		}
 	} else if out.RAMUsedKB != nil && out.RAMTotalKB != nil && *out.RAMTotalKB > 0 {
@@ -5298,6 +5367,37 @@ func (s *Server) collectContainerUsage(ctx context.Context, name string) (contai
 		return out, err
 	}
 	return out, nil
+}
+
+func memoryUsageFromKB(usedKB int64) *containerMemoryUsage {
+	return &containerMemoryUsage{
+		UsedKB:    usedKB,
+		UsedBytes: usedKB * 1024,
+	}
+}
+
+func cloneContainerMemoryUsage(source *containerMemoryUsage) *containerMemoryUsage {
+	if source == nil {
+		return nil
+	}
+	copy := *source
+	if source.Percent != nil {
+		value := *source.Percent
+		copy.Percent = &value
+	}
+	if source.AnonBytes != nil {
+		value := *source.AnonBytes
+		copy.AnonBytes = &value
+	}
+	if source.FileBytes != nil {
+		value := *source.FileBytes
+		copy.FileBytes = &value
+	}
+	if source.KernelBytes != nil {
+		value := *source.KernelBytes
+		copy.KernelBytes = &value
+	}
+	return &copy
 }
 
 func (s *Server) collectContainerCgroupMemoryUsage(name string) (*containerMemoryUsage, error) {
@@ -5323,7 +5423,70 @@ func (s *Server) collectContainerCgroupMemoryUsage(name string) (*containerMemor
 		percent := clampFloat(float64(used)*100/float64(limit), 0, 100)
 		memory.Percent = &percent
 	}
+	if breakdown, statErr := readCgroupMemoryBreakdown(filepath.Join(path, "memory.stat")); statErr == nil {
+		memory.AnonBytes = breakdown.AnonBytes
+		memory.FileBytes = breakdown.FileBytes
+		memory.KernelBytes = breakdown.KernelBytes
+	}
 	return memory, nil
+}
+
+type cgroupMemoryBreakdown struct {
+	AnonBytes   *int64
+	FileBytes   *int64
+	KernelBytes *int64
+}
+
+func readCgroupMemoryBreakdown(path string) (cgroupMemoryBreakdown, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cgroupMemoryBreakdown{}, err
+	}
+	values := map[string]int64{}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		value, parseErr := strconv.ParseInt(fields[1], 10, 64)
+		if parseErr != nil || value < 0 {
+			continue
+		}
+		values[fields[0]] = value
+	}
+
+	var breakdown cgroupMemoryBreakdown
+	if value, ok := values["anon"]; ok {
+		breakdown.AnonBytes = int64Pointer(value)
+	}
+	if value, ok := values["file"]; ok {
+		breakdown.FileBytes = int64Pointer(value)
+	}
+	if value, ok := values["kernel"]; ok {
+		breakdown.KernelBytes = int64Pointer(value)
+		return breakdown, nil
+	}
+
+	// cgroup v2 has no single kernel counter. Combine its non-overlapping
+	// kernel-accounted buckets; slab is already an aggregate, so do not also
+	// add slab_reclaimable or slab_unreclaimable.
+	var kernelBytes int64
+	foundKernelBucket := false
+	for _, key := range []string{"kernel_stack", "pagetables", "sec_pagetables", "percpu", "sock", "vmalloc", "slab"} {
+		if value, ok := values[key]; ok {
+			kernelBytes += value
+			foundKernelBucket = true
+		}
+	}
+	if foundKernelBucket {
+		breakdown.KernelBytes = int64Pointer(kernelBytes)
+	}
+	return breakdown, nil
+}
+
+// int64Pointer preserves a present zero-valued memory.stat field in JSON.
+func int64Pointer(value int64) *int64 {
+	return &value
 }
 
 func readCgroupBytes(path string) (int64, error) {
@@ -7458,7 +7621,7 @@ func enableCloudInitForLocalTemplate(req *createContainerRequest, templatePath s
 
 func isLinuxContainersCloudTemplate(templatePath string) bool {
 	path := "/" + strings.TrimPrefix(filepath.ToSlash(filepath.Clean(templatePath)), "/") + "/"
-	for _, directory := range []string{rootfsLinuxContainersDirectory, rootfsLinuxContainersLegacyDir} {
+	for _, directory := range []string{rootfsLinuxContainersDirectory, rootfsLinuxContainersPreviousDirectory, rootfsLinuxContainersLegacyDir} {
 		if strings.Contains(path, "/"+directory+"/cloud/") {
 			return true
 		}
@@ -7467,7 +7630,8 @@ func isLinuxContainersCloudTemplate(templatePath string) bool {
 }
 
 func isLinuxContainersRootfsAsset(asset rootfs.Asset) bool {
-	if strings.Contains(strings.ToLower(strings.TrimSpace(asset.SourceRepoName)), "linux containers") || strings.EqualFold(strings.TrimSpace(asset.Author), "Linux Containers") {
+	sourceName := strings.TrimSpace(asset.SourceRepoName)
+	if config.IsLinuxContainersRepositoryName(sourceName) || strings.Contains(strings.ToLower(sourceName), "lxc-image") || strings.Contains(strings.ToLower(sourceName), "linux containers") || strings.EqualFold(strings.TrimSpace(asset.Author), "Linux Containers") {
 		return true
 	}
 	parsed, err := url.Parse(strings.TrimSpace(asset.DownloadURL))
@@ -7927,8 +8091,9 @@ func (s *Server) localRootfsItems() ([]localRootfsItem, error) {
 func (s *Server) localTemplateRootfsSources() []localRootfsStorageSource {
 	sources := []localRootfsStorageSource{
 		{directory: rootfsDroidspacesOfficialDirectory, label: "Droidspaces Official"},
-		{directory: rootfsLinuxContainersDirectory, label: "Linux Containers", variantDirectories: true},
-		{directory: rootfsLinuxContainersLegacyDir, label: "Linux Containers（旧目录）"},
+		{directory: rootfsLinuxContainersDirectory, label: config.LinuxContainersRepositoryName, variantDirectories: true},
+		{directory: rootfsLinuxContainersPreviousDirectory, label: "lxc-image（旧目录）", variantDirectories: true},
+		{directory: rootfsLinuxContainersLegacyDir, label: "lxc-image（旧目录）", variantDirectories: true},
 		{directory: rootfsUploadsDirectory, label: "本地上传"},
 		{directory: rootfsExportsDirectory, label: "备份导出", kindOverride: "backup"},
 	}
@@ -7980,7 +8145,7 @@ func rootfsTemplateStorageSourceForAssetFromRepositories(asset rootfs.Asset, rep
 	return rootfsTemplateStorageSourceForRepository(repository)
 }
 
-// rootfsTemplateStorageDirectoryForAsset keeps Linux Containers variants
+// rootfsTemplateStorageDirectoryForAsset keeps lxc-image variants
 // separate. Images with the same release and build can exist as default and
 // cloud variants, so flattening them would overwrite a usable template.
 func (s *Server) rootfsTemplateStorageDirectoryForAsset(asset rootfs.Asset) string {
@@ -8012,7 +8177,7 @@ func rootfsTemplateStorageSourceForRepository(repository config.RootfsRepository
 		return localRootfsStorageSource{directory: rootfsDroidspacesOfficialDirectory, label: "Droidspaces Official"}
 	}
 	if isLinuxContainersRootfsRepository(repository) {
-		return localRootfsStorageSource{directory: rootfsLinuxContainersDirectory, label: "Linux Containers"}
+		return localRootfsStorageSource{directory: rootfsLinuxContainersDirectory, label: config.LinuxContainersRepositoryName}
 	}
 
 	label := strings.TrimSpace(repository.Name)
@@ -8046,8 +8211,7 @@ func isLinuxContainersRootfsRepository(repository config.RootfsRepository) bool 
 	if config.IsLinuxContainersNJURepositoryURL(repository.URL) {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(repository.Name), config.LinuxContainersRepositoryName) ||
-		strings.EqualFold(strings.TrimSpace(repository.Name), config.LinuxContainersNJURepositoryName)
+	return config.IsLinuxContainersRepositoryName(repository.Name)
 }
 
 func rootfsCustomRepositoryDirectory(repository config.RootfsRepository) string {
@@ -8189,7 +8353,7 @@ func legacyRootfsItemSource(name string) string {
 	lower := strings.ToLower(name)
 	switch {
 	case strings.Contains(lower, "linux-containers"):
-		return "Linux Containers（旧目录）"
+		return "lxc-image（旧目录）"
 	case strings.Contains(lower, "droidspaces"):
 		return "Droidspaces Official（旧目录）"
 	default:
@@ -9359,10 +9523,6 @@ func (s *Server) containerConfigContent(name, hostname, rootfsPath, netMode stri
 		writeConfigLine(&b, "dns_servers", strings.TrimSpace(req.DNSServers))
 	}
 	if netMode == "nat" {
-		if upstream, err := normalizeNATUpstreamIfnames(firstNonEmpty(req.NATUpstreamIfnames, req.NATUpstreamIfname)); err == nil && upstream != "" {
-			writeConfigLine(&b, "nat_upstream_ifnames", upstream)
-			writeConfigLine(&b, "upstream_interfaces", upstream)
-		}
 		if strings.TrimSpace(req.StaticNATIP) != "" {
 			writeConfigLine(&b, "static_nat_ip", strings.TrimSpace(req.StaticNATIP))
 		}
@@ -9827,11 +9987,6 @@ func (s *Server) validateCreateContainerConfig(name string, netMode string, req 
 			return err
 		}
 	}
-	if netMode == "nat" {
-		if _, err := normalizeNATUpstreamIfnames(firstNonEmpty(req.NATUpstreamIfnames, req.NATUpstreamIfname)); err != nil {
-			return err
-		}
-	}
 	if netMode == "gateway" {
 		if err := s.validateGatewayConfig(name, req.GatewayContainer, req.GatewayNet, req.GatewayLanIfname, req.GatewayBridge); err != nil {
 			return err
@@ -9852,44 +10007,10 @@ func (s *Server) validateCreateContainerConfig(name string, netMode string, req 
 	return nil
 }
 
-func normalizeNATUpstreamIfnames(value string) (string, error) {
-	value = config.NormalizeInterfaceList(value)
-	if value == "" && config.IsAndroid() {
-		value = defaultAndroidNATUpstreamIfnames
-	}
-	if err := config.ValidateInterfaceList(value); err != nil {
-		return "", fmt.Errorf("natUpstreamIfnames: %w", err)
-	}
-	return value, nil
-}
-
-func defaultNATUpstreamIfnames() string {
-	if config.IsAndroid() {
-		return defaultAndroidNATUpstreamIfnames
-	}
-	return ""
-}
-
-func natUpstreamMode() string {
-	if config.IsAndroid() {
-		return "android-default-network"
-	}
-	return "linux-default-route"
-}
-
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func firstNonEmptyPtr(values ...*string) string {
-	for _, value := range values {
-		if value != nil && strings.TrimSpace(*value) != "" {
-			return strings.TrimSpace(*value)
 		}
 	}
 	return ""

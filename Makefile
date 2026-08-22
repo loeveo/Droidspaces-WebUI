@@ -1,6 +1,9 @@
 BINARY_NAME = droidspaces-webui
 OUT_DIR = output
 CMD = ./cmd/droidspaces-webui
+GO ?= go
+LINUX_CONFIG_TEMPLATE = config/webui.linux.example.json
+ANDROID_CONFIG_TEMPLATE = config/webui.android.example.json
 GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_ID ?= $(shell date -u +%Y%m%dT%H%M%S%NZ)
 
@@ -12,30 +15,93 @@ endif
 
 VERSION_LDFLAGS := -X main.webVersion=$(VERSION)
 
-.PHONY: all build android-arm64 default-config run clean test local-smoke android-smoke
+# `all` intentionally covers the common Linux server/SBC and Android device
+# architectures. Android artifacts keep GOOS=linux because Droidspaces runs
+# them in Android's Linux userspace; this is the established deployment form.
+RELEASE_LINUX_TARGETS := linux-amd64 linux-arm64 linux-armv7 linux-386 linux-riscv64
+RELEASE_ANDROID_TARGETS := android-arm64 android-armv7 android-amd64 android-386
+RELEASE_TARGETS := $(RELEASE_LINUX_TARGETS) $(RELEASE_ANDROID_TARGETS)
 
-all: build
+.PHONY: all release build $(RELEASE_TARGETS) default-config config-templates linux-config android-config run clean test local-smoke android-smoke
+
+all: build $(RELEASE_TARGETS)
+
+release: all
 
 build:
 	@mkdir -p $(OUT_DIR)
-	go build -ldflags="$(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME) $(CMD)
+	$(GO) build -ldflags="$(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME) $(CMD)
 	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)"
 
+# Linux releases
+linux-amd64:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-linux-amd64 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-linux-amd64"
+
+linux-arm64:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-linux-arm64 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-linux-arm64"
+
+linux-armv7:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-linux-armv7 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-linux-armv7"
+
+linux-386:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=386 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-linux-386 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-linux-386"
+
+linux-riscv64:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-linux-riscv64 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-linux-riscv64"
+
+# Android releases (Android's supported ABI maps to Linux ELF targets here).
 android-arm64:
 	@mkdir -p $(OUT_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-android-arm64 $(CMD)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-android-arm64 $(CMD)
 	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-android-arm64"
+
+android-armv7:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-android-armv7 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-android-armv7"
+
+android-amd64:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-android-amd64 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-android-amd64"
+
+android-386:
+	@mkdir -p $(OUT_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=386 $(GO) build -trimpath -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(OUT_DIR)/$(BINARY_NAME)-android-386 $(CMD)
+	@echo "[+] Built: $(OUT_DIR)/$(BINARY_NAME)-android-386"
 
 default-config:
 	@mkdir -p $(OUT_DIR)
-	cp config/webui.example.json $(OUT_DIR)/webui.json
-	@echo "[+] Wrote: $(OUT_DIR)/webui.json"
+	cp $(LINUX_CONFIG_TEMPLATE) $(OUT_DIR)/webui.json
+	@echo "[+] Wrote Linux config: $(OUT_DIR)/webui.json"
+
+config-templates: linux-config android-config
+
+linux-config:
+	@mkdir -p $(OUT_DIR)
+	cp $(LINUX_CONFIG_TEMPLATE) $(OUT_DIR)/webui.linux.json
+	@echo "[+] Wrote Linux config: $(OUT_DIR)/webui.linux.json"
+
+android-config:
+	@mkdir -p $(OUT_DIR)
+	cp $(ANDROID_CONFIG_TEMPLATE) $(OUT_DIR)/webui.android.json
+	@echo "[+] Wrote Android config: $(OUT_DIR)/webui.android.json"
 
 run:
-	go run $(CMD) --config $(OUT_DIR)/webui.json
+	$(GO) run $(CMD) --config $(OUT_DIR)/webui.json
 
 test:
-	go test ./...
+	$(GO) test ./...
 
 clean:
 	@rm -rf $(OUT_DIR)

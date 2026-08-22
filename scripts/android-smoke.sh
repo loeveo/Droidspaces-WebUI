@@ -4,10 +4,10 @@ set -euo pipefail
 ADB=${ADB:-adb}
 DEVICE_SERIAL=${DEVICE_SERIAL:-}
 REMOTE_DIR=${REMOTE_DIR:-/data/local/Droidspaces}
-REMOTE_BIN=${REMOTE_BIN:-${REMOTE_DIR}/droidspaces-webui-smoke-android-arm64}
+REMOTE_BIN=${REMOTE_BIN:-${REMOTE_DIR}/bin/droidspaces-webui-smoke-android-arm64}
 REMOTE_CONFIG=${REMOTE_CONFIG:-${REMOTE_DIR}/webui-smoke.json}
 LOCAL_BIN=${LOCAL_BIN:-output/droidspaces-webui-android-arm64}
-LOCAL_CONFIG=${LOCAL_CONFIG:-output/webui.json}
+LOCAL_CONFIG=${LOCAL_CONFIG:-output/webui.android.json}
 HOST_PORT=${HOST_PORT:-9090}
 DEVICE_PORT=${DEVICE_PORT:-9090}
 AUTH_TOKEN=${AUTH_TOKEN:-}
@@ -75,23 +75,23 @@ adb_cmd get-state >/dev/null
 if [ "$PUSH" = "1" ]; then
   if [ ! -f "$LOCAL_BIN" ]; then
     echo "missing local binary: $LOCAL_BIN" >&2
-    echo "run: make android-arm64 default-config" >&2
+    echo "run: make android-arm64 android-config" >&2
     exit 1
   fi
   if [ ! -f "$LOCAL_CONFIG" ]; then
     echo "missing local config: $LOCAL_CONFIG" >&2
-    echo "run: make default-config" >&2
+    echo "run: make android-config" >&2
     exit 1
   fi
   tmp_bin="/data/local/tmp/$(basename "$REMOTE_BIN")"
   tmp_config="/data/local/tmp/$(basename "$REMOTE_CONFIG")"
-  remote_su "mkdir -p '${REMOTE_DIR}/Logs'"
+  remote_su "mkdir -p '${REMOTE_DIR}/bin' '${REMOTE_DIR}/Logs'"
   adb_cmd push "$LOCAL_BIN" "$tmp_bin" >/dev/null
   adb_cmd push "$LOCAL_CONFIG" "$tmp_config" >/dev/null
   remote_su "cp '$tmp_bin' '${REMOTE_BIN}' && cp '$tmp_config' '${REMOTE_CONFIG}' && chmod 755 '${REMOTE_BIN}' && rm -f '$tmp_bin' '$tmp_config'"
 fi
 
-remote_su "mkdir -p '${REMOTE_DIR}/Logs'; if [ -f '${PID_FILE}' ]; then kill \$(cat '${PID_FILE}') >/dev/null 2>&1 || true; rm -f '${PID_FILE}'; fi"
+remote_su "mkdir -p '${REMOTE_DIR}/bin' '${REMOTE_DIR}/Logs'; if [ -f '${PID_FILE}' ]; then kill \$(cat '${PID_FILE}') >/dev/null 2>&1 || true; rm -f '${PID_FILE}'; fi"
 start_cmd="cd '${REMOTE_DIR}' && nohup '${REMOTE_BIN}' --config '${REMOTE_CONFIG}' --listen 127.0.0.1:${DEVICE_PORT}"
 if [ -n "$AUTH_TOKEN" ]; then
   start_cmd="$start_cmd --auth-token $(shell_quote "$AUTH_TOKEN")"

@@ -1,5 +1,5 @@
 {
-  "_说明": "Droidspaces WebUI 默认配置模板。所有以下划线开头或带 _说明 后缀的字段都会被程序忽略，可以保留。",
+  "_说明": "兼容旧路径的 Android 配置模板。新部署请优先使用 webui.android.example.json；Linux 请使用 webui.linux.example.json。所有以下划线开头或带 _说明 后缀的字段都会被程序忽略，可以保留。",
   "mode_说明": "监听模式。local 只允许本机/ADB forward 访问；public 用于局域网或公网访问，建议配置固定 authToken；留空会生成临时密钥。",
   "mode": "local",
   "host_说明": "WebUI 监听地址。local 通常使用 127.0.0.1；public 通常使用 0.0.0.0。",
@@ -12,9 +12,9 @@
   "droidspacesPath": "/data/local/Droidspaces/bin/droidspaces",
   "corePath_说明": "Droidspaces 核心程序工作目录。不填写时默认取 droidspacesPath 的父目录。",
   "corePath": "/data/local/Droidspaces/bin",
-  "imageRoot_说明": "容器镜像/rootfs 默认存放目录。不填写时默认与 corePath 相同。",
-  "imageRoot": "/data/local/Droidspaces/bin",
-  "templateImageRoot_说明": "模板镜像存放目录，用于放置可复用的 rootfs/img 模板。",
+  "imageRoot_说明": "旧版 Core 镜像扫描目录兼容字段，当前默认与 templateImageRoot 相同；已下载模板与云端列表缓存均使用 templateImageRoot。不填写时默认取 workspace/rootfs。",
+  "imageRoot": "/data/local/Droidspaces/rootfs",
+  "templateImageRoot_说明": "模板镜像存放目录，用于放置可复用的 rootfs/img 模板。默认是 workspace/rootfs。",
   "templateImageRoot": "/data/local/Droidspaces/rootfs",
   "workspace_说明": "Droidspaces 工作区路径，Android 默认是 /data/local/Droidspaces，Linux 默认是 /var/lib/Droidspaces。",
   "workspace": "/data/local/Droidspaces",
@@ -44,14 +44,14 @@
   "batteryStatsWriteMinutes": 5,
   "overviewRefreshSeconds_说明": "首页概览高频刷新间隔，单位秒。仅在浏览器停留在概览页且页面可见时生效，范围 1-60。",
   "overviewRefreshSeconds": 3,
-  "rootfsRepositories_说明": "RootFS 云端列表。普通仓库 URL 指向 rootfs.json；Linux Containers 默认使用 https://images.linuxcontainers.org/。在设置中启用 CN 加速时，现有 Linux Containers 条目的 URL 会切换为 https://mirror.nju.edu.cn/lxc-images/，不会添加第二个来源；目录仍由官方读取，镜像文件从南京大学下载。可以添加多个其他仓库。",
+  "rootfsRepositories_说明": "RootFS 云端列表。普通仓库 URL 指向 rootfs.json；lxc-image 使用 Linux Containers 的 https://images.linuxcontainers.org/。在设置中启用 CN 加速时，现有 lxc-image 条目的 URL 会切换为 https://mirror.nju.edu.cn/lxc-images/，不会添加第二个来源；目录仍由官方读取，镜像文件从南京大学下载。可以添加多个其他仓库。",
   "rootfsRepositories": [
     {
       "name": "Droidspaces Official",
       "url": "https://github.com/Droidspaces/Droidspaces-rootfs-builder/raw/refs/heads/main/rootfs.json"
     },
     {
-      "name": "Linux Containers",
+      "name": "lxc-image",
       "url": "https://images.linuxcontainers.org/"
     }
   ]

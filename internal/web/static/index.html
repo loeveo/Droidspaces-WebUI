@@ -184,7 +184,7 @@
 
           <section id="networkView" class="view-panel" aria-label="网络管理">
             <section class="metric-grid compact" id="networkSummary"></section>
-          <section class="panel"><div class="panel-head split-head"><div><h2>NAT 默认配置</h2><p class="muted">出口由官方核心按当前运行平台自动检测</p></div></div><div class="form-grid settings-grid"><label><span>NAT 默认前缀</span><input id="defaultNatCIDR" type="text" value="172.28.1.x" readonly /></label><label><span>NAT 网关</span><input id="natGatewayIP" type="text" value="172.28.0.1" readonly /></label><label class="wide"><span>上游出口</span><input id="natUpstreamMode" type="text" value="自动检测默认路由" readonly /></label></div></section>
+          <section class="panel"><div class="panel-head split-head"><div><h2>NAT 默认配置</h2><p class="muted">出口由官方核心按当前运行平台自动检测，并在网络切换时自动更新。</p></div></div><div class="form-grid settings-grid"><label><span>NAT 默认前缀</span><input id="defaultNatCIDR" type="text" value="172.28.1.x" readonly /></label><label><span>NAT 网关</span><input id="natGatewayIP" type="text" value="172.28.0.1" readonly /></label><label class="wide"><span>上游出口（自动）</span><input id="natUpstreamMode" type="text" value="由核心自动检测" readonly /></label></div></section>
             <section class="panel"><div class="panel-head"><h2>端口与网络模式</h2></div><div class="table-wrap"><table><thead><tr><th>容器</th><th>状态</th><th>模式</th><th>NAT/IP</th><th>端口转发</th><th>DNS</th></tr></thead><tbody id="networkRows"><tr><td colspan="6" class="empty">加载中</td></tr></tbody></table></div></section>
           </section>
 
@@ -233,7 +233,6 @@
                   <div class="form-grid settings-grid">
                     <label class="wide"><span>Droidspaces 二进制</span><input id="settingsDroidspacesPath" type="text" /></label>
                     <label><span>核心目录</span><input id="settingsCorePath" type="text" /></label>
-                    <label><span>容器镜像目录</span><input id="settingsImageRoot" type="text" /></label>
                     <label><span>模板镜像目录</span><input id="settingsTemplateImageRoot" type="text" /></label>
                     <label><span>工作区</span><input id="settingsWorkspace" type="text" /></label>
                     <label><span>配置文件</span><input id="settingsConfigPath" type="text" readonly /></label>
@@ -245,7 +244,7 @@
                     <label><span>NAT 第 3 位</span><input id="settingsDefaultNatThirdOctet" type="number" min="1" max="254" step="1" inputmode="numeric" /></label>
                     <label><span>NAT 默认前缀</span><input id="settingsDefaultNatCIDR" type="text" value="172.28.1.x" readonly /></label>
                     <label><span>NAT 网关</span><input id="settingsNatGatewayIP" type="text" value="172.28.0.1" readonly /></label>
-                    <label class="wide"><span>上游出口</span><input id="settingsNatUpstreamMode" type="text" value="自动检测默认路由" readonly /></label>
+                    <label class="wide"><span>上游出口（自动）</span><input id="settingsNatUpstreamMode" type="text" value="由核心自动检测" readonly /></label>
 					<label class="check wide"><input id="settingsNestedAndroidNatCompat" type="checkbox" /><span>嵌套 Android NAT 路由兼容（仅在 Linux 容器中运行 WebUI 时启用；不修改防火墙）</span></label>
                   </div>
                 </section>
@@ -263,8 +262,8 @@
                 </section>
                 <section class="settings-card wide">
                   <div class="section-line"><h3>云端镜像仓库</h3><div class="tool-buttons"><button id="settingsRepoAddBtn" class="text-btn" type="button">新增仓库</button></div></div>
-                  <div class="settings-repo-preset" aria-label="Linux Containers 中国大陆加速源">
-                    <div class="settings-repo-preset-copy"><strong>Linux Containers CN 加速</strong><span>启用后将现有 Linux Containers RootFS 下载地址切换到南京大学镜像站。</span></div>
+                  <div class="settings-repo-preset" aria-label="lxc-image 中国大陆加速源">
+                    <div class="settings-repo-preset-copy"><strong>lxc-image CN 加速</strong><span>启用后将现有 lxc-image RootFS 下载地址切换到南京大学镜像站。</span></div>
                     <div class="settings-repo-preset-action"><label class="settings-repo-preset-toggle"><input id="settingsNjuMirrorEnabled" type="checkbox" aria-describedby="settingsNjuMirrorRepoStatus" /><span>启用 CN 加速</span></label><span id="settingsNjuMirrorRepoStatus" class="badge" aria-live="polite"></span></div>
                   </div>
                   <div id="settingsRepoRows" class="repo-rows settings-repo-rows"></div>
@@ -360,7 +359,6 @@
           <label id="createImageSizeField"><span>镜像大小 GB</span><input id="createImageSize" type="number" min="4" max="512" step="1" value="8" /></label>
           <label><span>网络</span><select id="createNetMode"><option value="nat" selected>nat</option><option value="host">host</option><option value="none">none</option><option value="gateway">gateway</option></select></label>
           <div id="createNatIpField" class="nat-ip-field"><span class="field-label">NAT 静态 IP</span><div class="nat-ip-row single-octet"><span id="createStaticNatPrefix" class="nat-ip-prefix">172.28.1.</span><label><span>第 4 字节</span><input id="createStaticNatOctet4" data-static-nat-prefix="create" type="number" min="1" max="254" step="1" inputmode="numeric" placeholder="自动" /></label></div><span class="field-desc">只填写第 4 位（1-254）；留空时按当前容器 IP 顺序自动加一。</span><input id="createStaticNatIp" type="hidden" /></div>
-          <div id="createNatUpstreamField" class="interface-field wide hidden"><label><span>Android NAT 上游接口</span><input id="createNatUpstreamIfnames" data-upstream-input="create" type="text" placeholder="wlan0,r_rmnet_data0,rmnet0" /></label><div id="createNatUpstreamOrder" class="interface-order-list" aria-label="Android NAT 上游接口顺序"></div></div>
           <label class="wide"><span>DNS</span><input id="createDns" type="text" placeholder="1.1.1.1,8.8.8.8" /></label>
           <label id="createPortsField" class="wide"><span>端口转发（每行一条）</span><textarea id="createPorts" class="form-textarea" rows="3" spellcheck="false" placeholder="2222:22/tcp&#10;8080:80/tcp&#10;10000-10010:10000-10010/udp"></textarea></label>
           <div id="createGatewayFields" class="form-subgrid wide hidden"><label><span>网关容器</span><input id="createGatewayContainer" type="text" placeholder="openwrt" /></label><label><span>网关网络名</span><input id="createGatewayNet" type="text" placeholder="lan" /></label><label><span>网关内接口</span><input id="createGatewayIface" type="text" placeholder="eth1" /></label><label><span>宿主桥接名</span><input id="createGatewayBridge" type="text" placeholder="ds-lan" /></label></div>
@@ -389,7 +387,6 @@
           <label><span>主机名</span><input id="configHostname" type="text" placeholder="默认同容器名称" /></label>
           <label><span>网络</span><select id="configNetMode"><option value="nat">nat</option><option value="host">host</option><option value="none">none</option><option value="gateway">gateway</option></select></label>
           <div id="configNatIpField" class="nat-ip-field"><span class="field-label">NAT 静态 IP</span><div class="nat-ip-row single-octet"><span id="configStaticNatPrefix" class="nat-ip-prefix">172.28.1.</span><label><span>第 4 字节</span><input id="configStaticNatOctet4" data-static-nat-prefix="config" type="number" min="0" max="254" step="1" inputmode="numeric" placeholder="留空清除" /></label></div><span class="field-desc">只可修改第 4 位；留空表示清除静态 IP。</span><input id="configStaticNatIp" type="hidden" /></div>
-          <div id="configNatUpstreamField" class="interface-field wide hidden"><label><span>Android NAT 上游接口</span><input id="configNatUpstreamIfnames" data-upstream-input="config" type="text" placeholder="wlan0,r_rmnet_data0,rmnet0" /></label><div id="configNatUpstreamOrder" class="interface-order-list" aria-label="Android NAT 上游接口顺序"></div></div>
           <label class="wide"><span>DNS</span><input id="configDns" type="text" placeholder="1.1.1.1,8.8.8.8" /></label>
           <label><span>Init</span><input id="configInit" type="text" placeholder="/sbin/init" /></label>
           <label id="configPortsField" class="wide"><span>端口转发（每行一条）</span><textarea id="configPorts" class="form-textarea" rows="3" spellcheck="false" placeholder="2222:22/tcp&#10;8080:80/tcp&#10;10000-10010:10000-10010/udp"></textarea></label>

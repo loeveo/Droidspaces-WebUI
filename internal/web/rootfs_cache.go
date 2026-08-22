@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,13 @@ import (
 )
 
 const (
-	rootfsListCacheTTL       = 24 * time.Hour
-	rootfsListCacheVersion   = 1
-	rootfsListCacheDirectory = "cache/rootfs"
+	rootfsListCacheTTL          = 24 * time.Hour
+	rootfsListCacheVersion      = 1
+	rootfsListCacheFilePrefix   = "catalog-"
+	rootfsLegacyCacheDirectory  = "cache/rootfs"
+	rootfsLegacyCacheFilePrefix = "rootfs-list-"
+	rootfsListRefreshHour       = 0
+	rootfsListRefreshMinute     = 10
 )
 
 // rootfsListCacheMetadata is deliberately additive to the existing rootfs
@@ -42,7 +47,158 @@ type rootfsListCacheResult struct {
 	Errors            []string
 	Repositories      []config.RootfsRepository
 	TemplateImageRoot string
+	cachePath         string
 	Cache             rootfsListCacheMetadata
+}
+
+// nextRootfsListCacheRefresh returns the next local-device 00:10. Passing the
+// location explicitly keeps scheduling deterministic in tests while production
+// uses time.Local, which is the device's configured clock and time zone.
+func nextRootfsListCacheRefresh(now time.Time, location *time.Location) time.Time {
+	if location == nil {
+		location = time.Local
+	}
+	now = now.In(location)
+	next := time.Date(now.Year(), now.Month(), now.Day(), rootfsListRefreshHour, rootfsListRefreshMinute, 0, 0, location)
+	if !next.After(now) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
+}
+
+// startRootfsCatalogRefreshScheduler refreshes only the remote catalog cache.
+// Template archives are stored under templateImageRoot and are deliberately
+// outside this cleanup path so a catalog refresh never discards downloads.
+func (s *Server) startRootfsCatalogRefreshScheduler() {
+	if s.disableRootfsCatalogRefresh {
+		return
+	}
+
+	s.rootfsCatalogRefreshMu.Lock()
+	if s.rootfsCatalogRefreshCancel != nil {
+		s.rootfsCatalogRefreshMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.rootfsCatalogRefreshCancel = cancel
+	s.rootfsCatalogRefreshDone = done
+	s.rootfsCatalogRefreshMu.Unlock()
+
+	go func() {
+		defer close(done)
+		for {
+			next := nextRootfsListCacheRefresh(time.Now(), time.Local)
+			timer := time.NewTimer(time.Until(next))
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+				s.refreshRootfsCatalogCache(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Server) stopRootfsCatalogRefreshScheduler() {
+	s.rootfsCatalogRefreshMu.Lock()
+	cancel := s.rootfsCatalogRefreshCancel
+	done := s.rootfsCatalogRefreshDone
+	s.rootfsCatalogRefreshCancel = nil
+	s.rootfsCatalogRefreshDone = nil
+	s.rootfsCatalogRefreshMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	if done != nil {
+		<-done
+	}
+}
+
+func (s *Server) refreshRootfsCatalogCache(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, rootfsMetadataTaskTimeout)
+	defer cancel()
+	result := s.cachedRootfsList(ctx, rootfs.DeviceArch(), true)
+	if len(result.Errors) > 0 {
+		log.Printf("scheduled rootfs catalog refresh failed; keeping the previous cache: %s", strings.Join(result.Errors, "; "))
+		return
+	}
+	if result.cachePath == "" {
+		log.Printf("scheduled rootfs catalog refresh fetched %d assets but could not persist a new cache; keeping the previous cache", len(result.Assets))
+		return
+	}
+	if err := s.clearRootfsListCacheExcept(result.cachePath); err != nil {
+		log.Printf("rootfs catalog cache cleanup failed: %v", err)
+	}
+	log.Printf("scheduled rootfs catalog refresh completed: %d assets", len(result.Assets))
+}
+
+func (s *Server) clearRootfsListCache() error {
+	s.rootfsCacheMu.Lock()
+	defer s.rootfsCacheMu.Unlock()
+	return clearRootfsListCacheExcept(rootfsListCacheDirectory(s.templateImageRoot), "")
+}
+
+func (s *Server) clearRootfsListCacheExcept(cachePath string) error {
+	s.rootfsCacheMu.Lock()
+	defer s.rootfsCacheMu.Unlock()
+	return clearRootfsListCacheExcept(filepath.Dir(cachePath), filepath.Base(cachePath))
+}
+
+func clearRootfsListCacheExcept(directory string, keepName string) error {
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, rootfsListCacheFilePrefix) && !strings.HasPrefix(name, "."+rootfsListCacheFilePrefix) {
+			continue
+		}
+		if name == keepName {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func clearLegacyRootfsListCache(directory string) error {
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, rootfsLegacyCacheFilePrefix) && !strings.HasPrefix(name, "."+rootfsLegacyCacheFilePrefix) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // cachedRootfsList serializes cache reads, metadata refreshes, and cache
@@ -66,7 +222,7 @@ func (s *Server) cachedRootfsList(ctx context.Context, requestedArch string, for
 	}
 
 	fingerprint := rootfsListCacheFingerprint(arch, repositories)
-	cachePath := rootfsListCachePath(s.workspace, fingerprint)
+	cachePath := rootfsListCachePath(s.templateImageRoot, fingerprint)
 	cached, _ := readRootfsListCache(cachePath, fingerprint)
 	now := time.Now().UTC()
 	if !forceRefresh && rootfsListCacheFresh(cached, now) {
@@ -85,8 +241,12 @@ func (s *Server) cachedRootfsList(ctx context.Context, requestedArch string, for
 			Assets:      assets,
 		}
 		// A cache write failure must not turn a successful upstream response into
-		// an error. The next request simply fetches metadata again.
-		_ = writeRootfsListCache(cachePath, entry)
+		// an error. The scheduler retains the previous cache in that case rather
+		// than deleting it after an unpersisted refresh.
+		if err := writeRootfsListCache(cachePath, entry); err == nil {
+			result.cachePath = cachePath
+			_ = clearLegacyRootfsListCache(filepath.Join(s.workspace, rootfsLegacyCacheDirectory))
+		}
 		result.Assets = assets
 		result.Cache = rootfsListCacheMetadata{CachedAt: cachedAt}
 		return result
@@ -129,8 +289,12 @@ func rootfsListCacheFingerprint(arch string, repositories []config.RootfsReposit
 	return hex.EncodeToString(sum[:])
 }
 
-func rootfsListCachePath(workspacePath string, fingerprint string) string {
-	return filepath.Join(workspacePath, rootfsListCacheDirectory, "rootfs-list-"+fingerprint+".json")
+func rootfsListCacheDirectory(templateImageRoot string) string {
+	return filepath.Join(templateImageRoot, rootfsLinuxContainersDirectory)
+}
+
+func rootfsListCachePath(templateImageRoot string, fingerprint string) string {
+	return filepath.Join(rootfsListCacheDirectory(templateImageRoot), rootfsListCacheFilePrefix+fingerprint+".json")
 }
 
 func rootfsListCacheFresh(entry *rootfsListCacheEntry, now time.Time) bool {
@@ -167,7 +331,7 @@ func writeRootfsListCache(path string, entry rootfsListCacheEntry) error {
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(directory, ".rootfs-list-*.tmp")
+	temporary, err := os.CreateTemp(directory, "."+rootfsListCacheFilePrefix+"*.tmp")
 	if err != nil {
 		return err
 	}

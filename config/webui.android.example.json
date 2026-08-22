@@ -1,0 +1,35 @@
+{
+  "_说明": "Droidspaces WebUI Android 标准配置。以 root 上下文运行时，Droidspaces 与 WebUI 二进制位于 /data/local/Droidspaces/bin/，配置文件位于 /data/local/Droidspaces/webui.json。所有以下划线开头的字段都会被程序忽略。",
+  "mode": "local",
+  "host": "127.0.0.1",
+  "port": 9090,
+  "authToken": "",
+  "droidspacesPath": "/data/local/Droidspaces/bin/droidspaces",
+  "corePath": "/data/local/Droidspaces/bin",
+  "workspace": "/data/local/Droidspaces",
+  "imageRoot": "/data/local/Droidspaces/rootfs",
+  "templateImageRoot": "/data/local/Droidspaces/rootfs",
+  "socketdEnabled": true,
+  "rootfsSkipTLSVerify": true,
+  "defaultNatCIDR": "172.28.0.0/16",
+  "defaultNatThirdOctet": 1,
+  "nestedAndroidNatCompat": false,
+  "batteryDirectPowerSupported": false,
+  "batterySeriesCells": 0,
+  "overviewPowerEnabled": true,
+  "batteryMonitoringEnabled": true,
+  "batteryDetailEnabled": true,
+  "batteryStatsSampleSeconds": 3,
+  "batteryStatsWriteMinutes": 5,
+  "overviewRefreshSeconds": 3,
+  "rootfsRepositories": [
+    {
+      "name": "Droidspaces Official",
+      "url": "https://github.com/Droidspaces/Droidspaces-rootfs-builder/raw/refs/heads/main/rootfs.json"
+    },
+    {
+      "name": "lxc-image",
+      "url": "https://images.linuxcontainers.org/"
+    }
+  ]
+}

@@ -469,6 +469,7 @@ func (s *Server) Close(ctx context.Context) error {
 	_, scope := s.nestedAndroidNATCompatState()
 	s.setNestedAndroidNATCompatState(false, scope.workspace)
 	s.stopNestedAndroidNATCompatMonitor()
+	s.stopRootfsCatalogRefreshScheduler()
 	s.stopBatteryStatsSampler()
 	return nil
 }

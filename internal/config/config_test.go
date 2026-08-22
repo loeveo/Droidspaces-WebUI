@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -41,11 +42,132 @@ func TestGenerateAuthToken(t *testing.T) {
 	}
 }
 
-func TestImageRootsDefaultFromCorePath(t *testing.T) {
+func TestDefaultPathLayout(t *testing.T) {
+	tests := []struct {
+		name              string
+		android           bool
+		workspace         string
+		corePath          string
+		droidspacesPath   string
+		templateImageRoot string
+	}{
+		{
+			name:              "Android",
+			android:           true,
+			workspace:         "/data/local/Droidspaces",
+			corePath:          "/data/local/Droidspaces/bin",
+			droidspacesPath:   "/data/local/Droidspaces/bin/droidspaces",
+			templateImageRoot: "/data/local/Droidspaces/rootfs",
+		},
+		{
+			name:              "Linux",
+			android:           false,
+			workspace:         "/var/lib/Droidspaces",
+			corePath:          "/var/lib/Droidspaces/bin",
+			droidspacesPath:   "/var/lib/Droidspaces/bin/droidspaces",
+			templateImageRoot: "/var/lib/Droidspaces/rootfs",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, corePath, droidspacesPath, templateImageRoot := defaultPathLayout(test.android)
+			if workspace != test.workspace || corePath != test.corePath || droidspacesPath != test.droidspacesPath || templateImageRoot != test.templateImageRoot {
+				t.Fatalf("defaultPathLayout(%t) = (%q, %q, %q, %q)", test.android, workspace, corePath, droidspacesPath, templateImageRoot)
+			}
+		})
+	}
+}
+
+func TestDefaultUsesCurrentPlatformWorkspaceLayout(t *testing.T) {
+	wantWorkspace, wantCorePath, wantDroidspacesPath, wantTemplateImageRoot := defaultPathLayout(IsAndroid())
+	cfg := Default()
+	if cfg.Workspace != wantWorkspace {
+		t.Fatalf("Workspace = %q, want %q", cfg.Workspace, wantWorkspace)
+	}
+	if cfg.CorePath != wantCorePath {
+		t.Fatalf("CorePath = %q, want %q", cfg.CorePath, wantCorePath)
+	}
+	if cfg.DroidspacesPath != wantDroidspacesPath {
+		t.Fatalf("DroidspacesPath = %q, want %q", cfg.DroidspacesPath, wantDroidspacesPath)
+	}
+	if cfg.TemplateImageRoot != wantTemplateImageRoot || cfg.ImageRoot != wantTemplateImageRoot {
+		t.Fatalf("template roots = (%q, %q), want %q", cfg.TemplateImageRoot, cfg.ImageRoot, wantTemplateImageRoot)
+	}
+	if got, want := DefaultPath(), filepath.Join(wantWorkspace, "webui.json"); got != want {
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
+	}
+}
+
+func TestPlatformExampleTemplatesUseCanonicalPaths(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("unable to locate config test source file")
+	}
+	templateDir := filepath.Join(filepath.Dir(sourceFile), "..", "..", "config")
+	tests := []struct {
+		name       string
+		file       string
+		workspace  string
+		corePath   string
+		binaryPath string
+		rootfsPath string
+		socketd    bool
+		skipTLS    bool
+	}{
+		{
+			name:       "Linux",
+			file:       "webui.linux.example.json",
+			workspace:  "/var/lib/Droidspaces",
+			corePath:   "/var/lib/Droidspaces/bin",
+			binaryPath: "/var/lib/Droidspaces/bin/droidspaces",
+			rootfsPath: "/var/lib/Droidspaces/rootfs",
+			socketd:    false,
+			skipTLS:    false,
+		},
+		{
+			name:       "Android",
+			file:       "webui.android.example.json",
+			workspace:  "/data/local/Droidspaces",
+			corePath:   "/data/local/Droidspaces/bin",
+			binaryPath: "/data/local/Droidspaces/bin/droidspaces",
+			rootfsPath: "/data/local/Droidspaces/rootfs",
+			socketd:    true,
+			skipTLS:    true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, _, err := Load(filepath.Join(templateDir, test.file), CLIOverrides{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Workspace != test.workspace || cfg.CorePath != test.corePath || cfg.DroidspacesPath != test.binaryPath {
+				t.Fatalf("paths = workspace:%q core:%q binary:%q", cfg.Workspace, cfg.CorePath, cfg.DroidspacesPath)
+			}
+			if cfg.ImageRoot != test.rootfsPath || cfg.TemplateImageRoot != test.rootfsPath {
+				t.Fatalf("template roots = image:%q template:%q, want %q", cfg.ImageRoot, cfg.TemplateImageRoot, test.rootfsPath)
+			}
+			if cfg.SocketdEnabled == nil || *cfg.SocketdEnabled != test.socketd {
+				t.Fatalf("SocketdEnabled = %#v, want %t", cfg.SocketdEnabled, test.socketd)
+			}
+			if cfg.RootfsSkipTLSVerify != test.skipTLS {
+				t.Fatalf("RootfsSkipTLSVerify = %t, want %t", cfg.RootfsSkipTLSVerify, test.skipTLS)
+			}
+			if len(cfg.RootfsRepositories) != 2 || cfg.RootfsRepositories[1].Name != LinuxContainersRepositoryName {
+				t.Fatalf("rootfs repositories = %#v", cfg.RootfsRepositories)
+			}
+		})
+	}
+}
+
+func TestTemplateImageRootDefaultsFromWorkspace(t *testing.T) {
 	cfg := Config{
 		Mode:            ModeLocal,
 		Host:            "127.0.0.1",
 		Port:            9090,
+		Workspace:       "/data/local/Droidspaces",
 		DroidspacesPath: "/data/local/Droidspaces/bin/droidspaces",
 	}
 
@@ -55,10 +177,10 @@ func TestImageRootsDefaultFromCorePath(t *testing.T) {
 	if cfg.CorePath != "/data/local/Droidspaces/bin" {
 		t.Fatalf("CorePath = %q", cfg.CorePath)
 	}
-	if cfg.ImageRoot != cfg.CorePath {
-		t.Fatalf("ImageRoot = %q, want %q", cfg.ImageRoot, cfg.CorePath)
+	if cfg.ImageRoot != "/data/local/Droidspaces/rootfs" {
+		t.Fatalf("ImageRoot = %q", cfg.ImageRoot)
 	}
-	if cfg.TemplateImageRoot != "/data/local/Droidspaces/bin/templates" {
+	if cfg.TemplateImageRoot != "/data/local/Droidspaces/rootfs" {
 		t.Fatalf("TemplateImageRoot = %q", cfg.TemplateImageRoot)
 	}
 }
@@ -170,6 +292,20 @@ func TestNormalizeLinuxContainersRepositoriesKeepsOneSelectedOrigin(t *testing.T
 				t.Fatalf("NormalizeLinuxContainersRepositories() = %#v, want %#v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestIsLinuxContainersRepositoryNameRecognizesCurrentAndLegacyNames(t *testing.T) {
+	for rawName, want := range map[string]bool{
+		LinuxContainersRepositoryName:    true,
+		LinuxContainersNJURepositoryName: true,
+		"Linux Containers":               true,
+		"Linux Containers CN（南京大学镜像）":    true,
+		"Other repository":               false,
+	} {
+		if got := IsLinuxContainersRepositoryName(rawName); got != want {
+			t.Errorf("IsLinuxContainersRepositoryName(%q) = %v, want %v", rawName, got, want)
+		}
 	}
 }
 

@@ -758,7 +758,7 @@ tr:hover td {
   gap: 6px;
 }
 
-.rootfs-source-badge.linux-containers {
+.rootfs-source-badge.lxc-image {
   border-color: #9dc9b6;
   background: #e8f5ee;
   color: #176544;
@@ -777,7 +777,7 @@ tr:hover td {
   color: #0f5f78;
 }
 
-.rootfs-source-badge.linux-containers {
+.rootfs-source-badge.lxc-image {
   border-color: #bedec6;
   background: #e6f4ea;
   color: var(--ok);
@@ -3728,23 +3728,6 @@ tr:hover td {
   padding: 0 8px;
 }
 
-.interface-field {
-  display: grid;
-  gap: 7px;
-  min-width: 0;
-}
-
-.interface-field > label {
-  display: grid;
-  gap: 6px;
-}
-
-.interface-order-list {
-  display: grid;
-  gap: 5px;
-}
-
-.interface-order-item,
 .priority-row {
   display: grid;
   align-items: center;
@@ -3755,22 +3738,11 @@ tr:hover td {
   min-width: 0;
 }
 
-.interface-order-item {
-  grid-template-columns: minmax(0, 1fr) auto;
-  padding: 5px 7px;
-}
-
-.interface-order-item .mono {
-  overflow-wrap: anywhere;
-}
-
-.interface-order-actions,
 .priority-actions {
   display: flex;
   gap: 4px;
 }
 
-.interface-order-actions .icon-btn,
 .priority-actions .icon-btn {
   width: 28px;
   min-width: 28px;

@@ -1,4 +1,3 @@
-const DEFAULT_ANDROID_NAT_UPSTREAM_IFNAMES = "wlan0,r_rmnet_data0,r_rmnet_data1,r_rmnet_data2,rmnet0,ccmni0,ccmni1,v4-ccmni0,v4-ccmni1";
 const PRIVILEGED_ACK = "我永远不会报告任何bug";
 const DEFAULT_OVERVIEW_REFRESH_SECONDS = 3;
 const DEFAULT_BATTERY_STATS_SAMPLE_SECONDS = 3;
@@ -10,9 +9,11 @@ const DEFAULT_NAT_THIRD_OCTET = 1;
 const LINUX_CONTAINERS_IMAGE_HOST = "images.linuxcontainers.org";
 const LINUX_CONTAINERS_OFFICIAL_URL = "https://images.linuxcontainers.org/";
 const DROIDSPACES_OFFICIAL_ROOTFS_REPOSITORY_PATH = "/droidspaces/droidspaces-rootfs-builder/";
-const LINUX_CONTAINERS_NAME = "Linux Containers";
+const LINUX_CONTAINERS_NAME = "lxc-image";
 const LINUX_CONTAINERS_CN_MIRROR_URL = "https://mirror.nju.edu.cn/lxc-images/";
-const LINUX_CONTAINERS_CN_MIRROR_NAME = "Linux Containers CN（南京大学镜像）";
+const LINUX_CONTAINERS_CN_MIRROR_NAME = "lxc-image CN（南京大学镜像）";
+const LEGACY_LINUX_CONTAINERS_NAME = "Linux Containers";
+const LEGACY_LINUX_CONTAINERS_CN_MIRROR_NAME = "Linux Containers CN（南京大学镜像）";
 const ROOTFS_REPOSITORY_URL_PLACEHOLDER = "rootfs.json 或 https://images.linuxcontainers.org/";
 const ROOTFS_ASSET_MEMORY_CACHE_MS = 24 * 60 * 60 * 1000;
 const CLOUD_INIT_MAX_DOCUMENT_BYTES = 64 * 1024;
@@ -53,7 +54,7 @@ const state = {
   rootfsErrors: [],
   systemSettings: {},
   coreUpdate: null,
-  networkSettings: { defaultNatCIDR: "172.28.0.0/16", defaultNatThirdOctet: DEFAULT_NAT_THIRD_OCTET, natGatewayIP: "172.28.0.1", upstreamMode: "linux-default-route", androidNATUpstreamPresets: false },
+  networkSettings: { defaultNatCIDR: "172.28.0.0/16", defaultNatThirdOctet: DEFAULT_NAT_THIRD_OCTET, natGatewayIP: "172.28.0.1" },
   containerUsers: {},
   containerServices: {},
   bootPriorityContainers: [],
@@ -715,12 +716,18 @@ function isLinuxContainersOfficialRepositoryURL(value) {
 function isLinuxContainersCNMirrorSource(value) {
   const source = String(value || "").trim().toLowerCase();
   return source === LINUX_CONTAINERS_CN_MIRROR_NAME.toLowerCase()
-    || (source.includes("linux containers") && (source.includes("南京大学") || source.includes("nju")));
+    || source === LEGACY_LINUX_CONTAINERS_CN_MIRROR_NAME.toLowerCase()
+    || ((source.includes("lxc-image") || source.includes("linux containers")) && (source.includes("南京大学") || source.includes("nju")));
 }
 
 function isLinuxContainersSource(value) {
   const source = String(value || "").trim().toLowerCase();
-  return source.includes("linux containers") || source.includes("linuxcontainers") || source.includes(LINUX_CONTAINERS_IMAGE_HOST);
+  return source === LINUX_CONTAINERS_NAME.toLowerCase()
+    || source === LEGACY_LINUX_CONTAINERS_NAME.toLowerCase()
+    || source.includes("lxc-image")
+    || source.includes("linux containers")
+    || source.includes("linuxcontainers")
+    || source.includes(LINUX_CONTAINERS_IMAGE_HOST);
 }
 
 function rootfsRepositoryInfo(repository) {
@@ -743,7 +750,7 @@ function rootfsAssetSource(asset) {
   const source = firstValue(asset?.sourceRepoName, asset?.sourceRepo, asset?.repositoryName, asset?.repository);
   const downloadURL = rootfsAssetDownloadURL(asset);
   if (isLinuxContainersCNMirrorURL(downloadURL) || isLinuxContainersCNMirrorSource(source)) return LINUX_CONTAINERS_CN_MIRROR_NAME;
-  if (isLinuxContainersSource(source) || isLinuxContainersURL(downloadURL)) return "Linux Containers（官方）";
+  if (isLinuxContainersSource(source) || isLinuxContainersURL(downloadURL)) return LINUX_CONTAINERS_NAME;
   return String(source || "未标注来源").trim() || "未标注来源";
 }
 
@@ -1136,17 +1143,6 @@ function validateCreatePortForwardAvailability(value) {
   return "";
 }
 
-function validateCreateInterfaceList(value) {
-  const tokens = String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
-  const normalized = tokens.join(",");
-  if (normalized.length >= 512) return "NAT 上游接口列表不能超过 511 个字符";
-  for (const token of tokens) {
-    if (token.length >= 16) return "NAT 上游接口“" + token + "”不能超过 15 个字符";
-    if (!/^[A-Za-z0-9_.:*?\[\]-]+$/.test(token)) return "NAT 上游接口“" + token + "”包含无效字符";
-  }
-  return "";
-}
-
 function validateCreateMemoryLimit(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "0" || text === "none" || text === "unlimited") return "";
@@ -1307,11 +1303,38 @@ function containerUsageText(usage) {
 }
 
 function containerMemoryText(container) {
-  // Deliberately avoid legacy top-level RAM fields: older cores populated them
-  // from host memory rather than the container cgroup.
   const text = containerUsageText(container?.memoryUsage);
   if (text) return text;
   return container?.running ? "待采样" : "-";
+}
+
+function containerMemoryLabel(container) {
+  switch (String(container?.memoryUsageSource || "").trim()) {
+    case "core-rss":
+      return "进程内存";
+    case "cgroup-memory.current":
+      return "Cgroup 内存";
+    default:
+      return "内存";
+  }
+}
+
+function cgroupMemoryComponentText(usage, key) {
+  const bytes = metricNumber(usage?.[key]);
+  return bytes !== null && bytes > 0 ? fmtBytesOptional(bytes) : "";
+}
+
+function containerCgroupMemoryRows(container) {
+  if (String(container?.memoryUsageSource || "").trim() !== "core-rss") return [];
+  const usage = container?.cgroupMemoryUsage;
+  const total = containerUsageText(usage);
+  if (!total) return [];
+  return [
+    ["Cgroup 总占用（含缓存）", total],
+    ["文件缓存", cgroupMemoryComponentText(usage, "fileBytes")],
+    ["匿名内存", cgroupMemoryComponentText(usage, "anonBytes")],
+    ["内核内存", cgroupMemoryComponentText(usage, "kernelBytes")],
+  ];
 }
 
 function containerDiskText(container) {
@@ -1399,85 +1422,15 @@ function toggleFieldForMode(selectSelector, fieldSelector, expectedMode) {
   field.querySelectorAll("input, textarea, select").forEach((input) => { input.disabled = !show; });
 }
 
-function androidNATUpstreamPresetsEnabled() {
-  return Boolean(
-    state.systemSettings?.androidNATUpstreamPresets
-    || state.networkSettings?.androidNATUpstreamPresets
-    || state.systemSettings?.upstreamMode === "android-default-network"
-    || state.networkSettings?.upstreamMode === "android-default-network",
-  );
-}
-
-function natUpstreamModeLabel(data = {}) {
-  return data.androidNATUpstreamPresets || data.upstreamMode === "android-default-network"
-    ? "自动跟随 Android 默认网络"
-    : "自动检测 Linux 默认路由";
-}
-
-function updateNATUpstreamField(prefix) {
-  const select = $(`#${prefix}NetMode`);
-  const field = $(`#${prefix}NatUpstreamField`);
-  const input = $(`#${prefix}NatUpstreamIfnames`);
-  if (!select || !field || !input) return;
-  const enabled = androidNATUpstreamPresetsEnabled();
-  const show = enabled && select.value === "nat";
-  field.classList.toggle("hidden", !show);
-  field.querySelectorAll("input, textarea, select, button").forEach((node) => { node.disabled = !show; });
-  if (!enabled) {
-    input.value = "";
-  } else if (!input.value.trim()) {
-    input.value = DEFAULT_ANDROID_NAT_UPSTREAM_IFNAMES;
-  }
-}
-
-function natUpstreamIfnamesForPayload(prefix, netMode) {
-  if (netMode !== "nat" || !androidNATUpstreamPresetsEnabled()) return "";
-  return normalizeListInput($(`#${prefix}NatUpstreamIfnames`)?.value || DEFAULT_ANDROID_NAT_UPSTREAM_IFNAMES);
-}
-
 function updateNetworkModeFields() {
   togglePortField("#createNetMode", "#createPortsField");
   togglePortField("#configNetMode", "#configPortsField");
   toggleFieldForMode("#createNetMode", "#createNatIpField", "nat");
   toggleFieldForMode("#configNetMode", "#configNatIpField", "nat");
-  updateNATUpstreamField("create");
-  updateNATUpstreamField("config");
   toggleFieldForMode("#createNetMode", "#createGatewayFields", "gateway");
   toggleFieldForMode("#configNetMode", "#configGatewayFields", "gateway");
   syncForcedDisableIPv6("#createNetMode", "#createDisableIpv6");
   syncForcedDisableIPv6("#configNetMode", "#configDisableIpv6");
-  renderUpstreamOrder("create");
-  renderUpstreamOrder("config");
-}
-
-function orderedUpstreamInterfaces(prefix) {
-  const input = $(`#${prefix}NatUpstreamIfnames`);
-  if (!input) return [];
-  const seen = new Set();
-  return String(input.value || "").split(",").map((value) => value.trim()).filter((value) => {
-    if (!value || seen.has(value)) return false;
-    seen.add(value);
-    return true;
-  });
-}
-
-function renderUpstreamOrder(prefix) {
-  const input = $(`#${prefix}NatUpstreamIfnames`);
-  const node = $(`#${prefix}NatUpstreamOrder`);
-  if (!input || !node) return;
-  const interfaces = orderedUpstreamInterfaces(prefix);
-  node.innerHTML = interfaces.map((name, index) => `<div class="interface-order-item"><span class="mono">${escapeHTML(name)}</span><div class="interface-order-actions"><button class="icon-btn" type="button" data-upstream-move="up" data-upstream-prefix="${prefix}" data-upstream-index="${index}" title="上移" aria-label="上移" ${index === 0 ? "disabled" : ""}>↑</button><button class="icon-btn" type="button" data-upstream-move="down" data-upstream-prefix="${prefix}" data-upstream-index="${index}" title="下移" aria-label="下移" ${index === interfaces.length - 1 ? "disabled" : ""}>↓</button></div></div>`).join("");
-}
-
-function moveUpstreamInterface(prefix, index, direction) {
-  const input = $(`#${prefix}NatUpstreamIfnames`);
-  if (!input) return;
-  const interfaces = orderedUpstreamInterfaces(prefix);
-  const target = index + (direction === "up" ? -1 : 1);
-  if (index < 0 || index >= interfaces.length || target < 0 || target >= interfaces.length) return;
-  [interfaces[index], interfaces[target]] = [interfaces[target], interfaces[index]];
-  input.value = interfaces.join(",");
-  renderUpstreamOrder(prefix);
 }
 
 function modeForcesDisableIPv6(mode) {
@@ -2203,7 +2156,7 @@ function renderContainers() {
       meta.push(["NAT/IP", container.natIp || "-"]);
       if (compactPortText(container)) meta.push(["端口", compactPortText(container)]);
     }
-    meta.push(["CPU", containerCpuText(container)], ["内存", containerMemoryText(container)]);
+    meta.push(["CPU", containerCpuText(container)], [containerMemoryLabel(container), containerMemoryText(container)]);
     if (container.diskUsage || container.useSparseImage) meta.push(["磁盘占用", containerDiskText(container)]);
     return `<article class="container-card" data-name="${encoded}">
       <div class="container-card-head">
@@ -2229,7 +2182,7 @@ function containerOverviewNetworkText(container) {
 
 function containerOverviewResourceText(container) {
   if (!container?.running) return `磁盘 ${containerDiskText(container)}`;
-  return `CPU ${containerCpuText(container)} · 内存 ${containerMemoryText(container)}`;
+  return `CPU ${containerCpuText(container)} · ${containerMemoryLabel(container)} ${containerMemoryText(container)}`;
 }
 
 function renderOverviewContainers() {
@@ -2362,7 +2315,7 @@ function renderDetail(data) {
   const summaryCards = [
     detailCard("概览", [["系统", distroName], ["状态", data.running ? "已启动" : "已停止"], ["运行时间", data.running ? containerUptimeText(data) : ""], ["PID", data.running ? data.pid : ""], ["UUID", data.uuid], ["主机名", data.hostname], ["启动时间", data.running && data.startedAt ? fmtTime(data.startedAt) : ""], ["开机启动", data.runAtBoot ? "启用" : ""], ["启动顺序", data.runAtBootPriority || ""], ["来源", data.source ? sourceLabel(data.source) : ""]]),
     detailCard("网络", networkRows),
-    detailCard("资源", [["内存用量", containerMemoryText(data)], ["内存限制", data.memoryLimitText || (data.memoryLimit ? fmtBytes(data.memoryLimit) : "")], ["磁盘占用", containerDiskText(data)], ["CPU", data.cpusText || (data.cpuQuota ? `${data.cpuQuota}/${data.cpuPeriod || "默认"}` : "")], ["PIDs", data.pidsLimit || data.configValues?.pids_limit]]),
+    detailCard("资源", [[containerMemoryLabel(data), containerMemoryText(data)], ...containerCgroupMemoryRows(data), ["内存限制", data.memoryLimitText || (data.memoryLimit ? fmtBytes(data.memoryLimit) : "")], ["磁盘占用", containerDiskText(data)], ["CPU", data.cpusText || (data.cpuQuota ? `${data.cpuQuota}/${data.cpuPeriod || "默认"}` : "")], ["PIDs", data.pidsLimit || data.configValues?.pids_limit]]),
     detailCard("镜像", [["路径", data.rootfsPath], ["镜像", data.imageRef], ["Init", data.customInit]]),
     detailHTMLCard("绑定挂载", binds, { wide: true }),
     detailHTMLCard("环境变量", envRows, { wide: true }),
@@ -3198,7 +3151,6 @@ async function createContainer(event) {
     dnsServers: $("#createDns").value.trim(),
     portForwards: netMode === "nat" ? normalizeListInput($("#createPorts").value) : "",
     staticNatIp: netMode === "nat" ? staticNATIPValue("create") : "",
-    natUpstreamIfnames: natUpstreamIfnamesForPayload("create", netMode),
     gatewayContainer: netMode === "gateway" ? $("#createGatewayContainer").value.trim() : "",
     gatewayNet: netMode === "gateway" ? $("#createGatewayNet").value.trim() : "",
     gatewayLanIfname: netMode === "gateway" ? $("#createGatewayIface").value.trim() : "",
@@ -3268,7 +3220,6 @@ function showCreateModal(options = {}) {
   resetCreateCloudInitFields();
   renderRuntimeVersions();
   $("#createCloudTask").textContent = "选择镜像后直接创建，后台会下载并继续创建容器。";
-  if (androidNATUpstreamPresetsEnabled() && !$("#createNatUpstreamIfnames").value.trim()) $("#createNatUpstreamIfnames").value = DEFAULT_ANDROID_NAT_UPSTREAM_IFNAMES;
   clearCreateTemplateSelection();
   const sourceInput = document.querySelector(`input[name="createSource"][value="${requestedSource}"]`);
   if (sourceInput) sourceInput.checked = true;
@@ -3293,7 +3244,6 @@ function showCreateModal(options = {}) {
   setCreateTemplateSelectionLocked(directSelection);
   updateDeadlockControls("create");
   updateUserNamespaceControls("create");
-  renderUpstreamOrder("create");
   updateCreateFormValidation();
   setTimeout(() => {
     if (directSelection) {
@@ -3448,7 +3398,6 @@ function renderSystemSettings(data = state.systemSettings || {}) {
   setInputValue("#settingsAuthToken", data.authToken || "");
   setInputValue("#settingsDroidspacesPath", data.droidspacesPath || "");
   setInputValue("#settingsCorePath", data.corePath || "");
-  setInputValue("#settingsImageRoot", data.imageRoot || "");
   setInputValue("#settingsTemplateImageRoot", data.templateImageRoot || "");
   setInputValue("#settingsWorkspace", data.workspace || "");
   setInputValue("#settingsConfigPath", data.configPath || "");
@@ -3456,7 +3405,6 @@ function renderSystemSettings(data = state.systemSettings || {}) {
   setInputValue("#settingsDefaultNatCIDR", natAddressPoolText());
   updateNATPrefixLabels();
   setInputValue("#settingsNatGatewayIP", data.natGatewayIP || "172.28.0.1");
-  setInputValue("#settingsNatUpstreamMode", natUpstreamModeLabel(data));
   setChecked("#settingsSocketdEnabled", data.socketdEnabled);
   setChecked("#settingsRootfsSkipTLSVerify", data.rootfsSkipTLSVerify);
 	setChecked("#settingsNestedAndroidNatCompat", data.nestedAndroidNatCompat);
@@ -3557,7 +3505,7 @@ function rootfsRepositoryRow(repository, index, settings = false) {
   const nameAttribute = settings ? `data-settings-repo-name="${index}"` : `data-repo-name="${index}"`;
   const urlAttribute = settings ? `data-settings-repo-url="${index}"` : `data-repo-url="${index}"`;
   const removeAttribute = settings ? `data-settings-repo-remove="${index}"` : `data-repo-remove="${index}"`;
-  return `<div class="repo-row"><input ${nameAttribute} type="text" placeholder="名称" value="${escapeHTML(info.name)}" /><input ${urlAttribute} type="url" placeholder="${escapeHTML(ROOTFS_REPOSITORY_URL_PLACEHOLDER)}" title="可填写 rootfs.json、Linux Containers 官方镜像站或南京大学镜像站" value="${escapeHTML(info.url)}" /><button class="icon-btn danger" type="button" ${removeAttribute} title="删除仓库" aria-label="删除仓库">×</button></div>`;
+  return `<div class="repo-row"><input ${nameAttribute} type="text" placeholder="名称" value="${escapeHTML(info.name)}" /><input ${urlAttribute} type="url" placeholder="${escapeHTML(ROOTFS_REPOSITORY_URL_PLACEHOLDER)}" title="可填写 rootfs.json、lxc-image 镜像站或南京大学镜像站" value="${escapeHTML(info.url)}" /><button class="icon-btn danger" type="button" ${removeAttribute} title="删除仓库" aria-label="删除仓库">×</button></div>`;
 }
 
 function isLinuxContainersRepositoryEntry(repository) {
@@ -3570,7 +3518,7 @@ function hasLinuxContainersCNMirrorRepository(repos) {
   return safeArray(repos).some((repo) => isLinuxContainersCNMirrorRepositoryURL(rootfsRepositoryURL(repo)));
 }
 
-// Keep a single Linux Containers repository. Earlier WebUI versions added the
+// Keep a single lxc-image repository. Earlier WebUI versions added the
 // Nanjing mirror as a second row, so normalize those saved settings on render.
 function setLinuxContainersMirrorRepository(repos, enabled, addWhenMissing = false) {
   const items = [];
@@ -3633,7 +3581,9 @@ function collectSystemSettings() {
     authToken: $("#settingsAuthToken")?.value.trim() || "",
     droidspacesPath: $("#settingsDroidspacesPath")?.value.trim() || "",
     corePath: $("#settingsCorePath")?.value.trim() || "",
-    imageRoot: $("#settingsImageRoot")?.value.trim() || "",
+    // imageRoot remains a backend compatibility setting. It has no editable UI
+    // because downloaded templates now use templateImageRoot exclusively.
+    imageRoot: state.systemSettings.imageRoot || "",
     templateImageRoot: $("#settingsTemplateImageRoot")?.value.trim() || "",
     workspace: $("#settingsWorkspace")?.value.trim() || "",
     socketdEnabled: $("#settingsSocketdEnabled")?.checked || false,
@@ -3665,7 +3615,7 @@ async function saveSystemSettingsFromForm() {
     state.rootfsAssetsLoaded = false;
     state.rootfsAssetsLoadedAt = 0;
     state.rootfsAssetsArchitecture = "";
-    state.networkSettings = { ...state.networkSettings, defaultNatCIDR: data.defaultNatCIDR || payload.defaultNatCIDR, defaultNatThirdOctet: data.defaultNatThirdOctet || payload.defaultNatThirdOctet, natGatewayIP: data.natGatewayIP || "172.28.0.1", upstreamMode: data.upstreamMode || "auto" };
+    state.networkSettings = { ...state.networkSettings, defaultNatCIDR: data.defaultNatCIDR || payload.defaultNatCIDR, defaultNatThirdOctet: data.defaultNatThirdOctet || payload.defaultNatThirdOctet, natGatewayIP: data.natGatewayIP || "172.28.0.1" };
     setAuthToken(payload.authToken);
     renderSystemSettings(data);
     updateNATPrefixLabels();
@@ -3779,7 +3729,7 @@ function filteredRootfsAssets(assets) {
 }
 
 function rootfsSourceBadgeClass(source) {
-  return isLinuxContainersSource(source) ? "linux-containers" : "";
+  return isLinuxContainersSource(source) ? "lxc-image" : "";
 }
 
 function renderRootfsSourceFilter(assets) {
@@ -4344,10 +4294,9 @@ function updateCreateFormValidation() {
     const natIP = natOctet ? staticNATIPValue("create") : "";
     const natConflict = natIP && state.containers.some((container) => String(container.natIp || container.staticNatIp || "") === natIP);
     createFormValidationError("#createStaticNatOctet4", !staticNATOctetValid(natOctet, 1, 254) ? "NAT 静态 IP 第 4 字节必须是 1 到 254" : (natConflict ? "该 NAT 静态 IP 已被其他容器使用" : ""), errors);
-    createFormValidationError("#createNatUpstreamIfnames", androidNATUpstreamPresetsEnabled() ? validateCreateInterfaceList($("#createNatUpstreamIfnames")?.value) : "", errors);
     createFormValidationError("#createPorts", validateCreatePortForwards($("#createPorts")?.value) || validateCreatePortForwardAvailability($("#createPorts")?.value), errors);
   } else {
-    ["#createStaticNatOctet4", "#createNatUpstreamIfnames", "#createPorts"].forEach((selector) => createFormValidationError(selector, "", errors));
+    ["#createStaticNatOctet4", "#createPorts"].forEach((selector) => createFormValidationError(selector, "", errors));
   }
 
   if (netMode === "gateway") {
@@ -4843,9 +4792,6 @@ async function openConfigModal(name) {
     $("#configHostname").value = data.hostname || "";
     $("#configNetMode").value = data.netMode || "nat";
     setStaticNATIP("config", data.staticNatIp || data.natIp || "");
-    $("#configNatUpstreamIfnames").value = androidNATUpstreamPresetsEnabled()
-      ? (data.natUpstreamIfnames || data.configValues?.nat_upstream_ifnames || data.configValues?.upstream_interfaces || DEFAULT_ANDROID_NAT_UPSTREAM_IFNAMES)
-      : "";
     $("#configDns").value = data.dnsServers || "";
     $("#configPorts").value = portLines(data.ports);
     $("#configGatewayContainer").value = data.gatewayContainer || data.configValues?.gateway_container || "";
@@ -4878,7 +4824,6 @@ async function openConfigModal(name) {
     updateDeadlockControls("config");
     updateUserNamespaceControls("config");
     updateGraphicsFlagFields("config");
-    renderUpstreamOrder("config");
     $("#configEnv").value = safeArray(data.env).map((env) => `${env.key}=${env.value}`).join("\n");
     updateNetworkModeFields();
     setConfigSaveStatus("");
@@ -4958,7 +4903,6 @@ async function submitConfig(event) {
     dnsServers: $("#configDns").value.trim(),
     portForwards: netMode === "nat" ? normalizeListInput($("#configPorts").value) : "",
     staticNatIp: netMode === "nat" ? staticNATIPValue("config") : "",
-    natUpstreamIfnames: natUpstreamIfnamesForPayload("config", netMode),
     gatewayContainer: netMode === "gateway" ? $("#configGatewayContainer").value.trim() : "",
     gatewayNet: netMode === "gateway" ? $("#configGatewayNet").value.trim() : "",
     gatewayLanIfname: netMode === "gateway" ? $("#configGatewayIface").value.trim() : "",
@@ -5056,7 +5000,6 @@ function renderNetworkSettings() {
   const data = state.networkSettings || {};
   updateNATPrefixLabels();
   if ($("#natGatewayIP")) $("#natGatewayIP").value = data.natGatewayIP || "172.28.0.1";
-  if ($("#natUpstreamMode")) $("#natUpstreamMode").value = natUpstreamModeLabel(data);
 }
 
 function renderNetwork() {
@@ -5635,10 +5578,6 @@ document.addEventListener("click", (event) => {
     moveBootPriority(Number(button.dataset.bootPriorityIndex), button.dataset.bootPriorityMove);
     return;
   }
-  if (button.dataset.upstreamMove) {
-    moveUpstreamInterface(button.dataset.upstreamPrefix, Number(button.dataset.upstreamIndex), button.dataset.upstreamMove);
-    return;
-  }
   if (button.dataset.serviceFilter) {
     state.serviceFilter = button.dataset.serviceFilter;
     state.serviceSearch = "";
@@ -5831,11 +5770,6 @@ document.addEventListener("input", (event) => {
     if (natOctet.dataset.staticNatPrefix === "create") updateCreateFormValidation();
     return;
   }
-  const upstreamInput = event.target.closest?.("[data-upstream-input]");
-  if (upstreamInput) {
-    renderUpstreamOrder(upstreamInput.dataset.upstreamInput);
-    return;
-  }
   const input = event.target.closest?.("#detailServiceSearch");
   if (!input) return;
   state.serviceSearch = input.value || "";
@@ -5947,7 +5881,7 @@ function bindUI() {
     const enabled = event.currentTarget.checked;
     const repositories = setLinuxContainersMirrorRepository(collectSettingsRepositories(), enabled, true);
     renderSettingsRepositories(repositories);
-    toast(enabled ? "已切换为南京大学 Linux Containers 下载源，保存设置后生效" : "已切换为 Linux Containers 官方下载源，保存设置后生效");
+    toast(enabled ? "已切换为南京大学 lxc-image 下载源，保存设置后生效" : "已切换为 lxc-image 官方下载源，保存设置后生效");
   });
   $("#configTermuxX11")?.addEventListener("change", () => updateGraphicsFlagFields("config"));
   $("#configVirgl")?.addEventListener("change", () => updateGraphicsFlagFields("config"));
@@ -6014,8 +5948,6 @@ async function boot() {
   updateDeadlockControls("config");
   updateUserNamespaceControls("create");
   updateUserNamespaceControls("config");
-  renderUpstreamOrder("create");
-  renderUpstreamOrder("config");
   renderNetworkSettings();
   if (window.DS_AUTH_REQUIRED) {
     const token = getAuthToken();
