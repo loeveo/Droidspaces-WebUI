@@ -4,6 +4,10 @@ CMD = ./cmd/droidspaces-webui
 GO ?= go
 LINUX_CONFIG_TEMPLATE = config/webui.linux.example.json
 ANDROID_CONFIG_TEMPLATE = config/webui.android.example.json
+RELEASE_NAME ?= Droidspaces-WebUI
+RELEASE_VERSION ?= v0.1.0
+SUPPORTED_CORE_VERSION ?= v6.5.0
+RELEASE_BUILD_VERSION := $(RELEASE_VERSION)-ds$(patsubst v%,%,$(SUPPORTED_CORE_VERSION))
 GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_ID ?= $(shell date -u +%Y%m%dT%H%M%S%NZ)
 
@@ -22,11 +26,20 @@ RELEASE_LINUX_TARGETS := linux-amd64 linux-arm64 linux-armv7 linux-386 linux-ris
 RELEASE_ANDROID_TARGETS := android-arm64 android-armv7 android-amd64 android-386
 RELEASE_TARGETS := $(RELEASE_LINUX_TARGETS) $(RELEASE_ANDROID_TARGETS)
 
-.PHONY: all release build $(RELEASE_TARGETS) default-config config-templates linux-config android-config run clean test local-smoke android-smoke
+.PHONY: all release package release-package build $(RELEASE_TARGETS) default-config config-templates linux-config android-config run clean test local-smoke android-smoke
 
 all: build $(RELEASE_TARGETS)
 
 release: all
+
+# Builds all published architectures, copies the two deployment templates, and
+# produces a checksum-verified release archive. RELEASE_VERSION may be
+# overridden for later releases, for example `make package RELEASE_VERSION=v0.2.0`.
+package:
+	$(MAKE) all config-templates VERSION="$(RELEASE_BUILD_VERSION)"
+	RELEASE_NAME="$(RELEASE_NAME)" RELEASE_VERSION="$(RELEASE_VERSION)" SUPPORTED_CORE_VERSION="$(SUPPORTED_CORE_VERSION)" OUT_DIR="$(OUT_DIR)" ./scripts/package-release.sh
+
+release-package: package
 
 build:
 	@mkdir -p $(OUT_DIR)

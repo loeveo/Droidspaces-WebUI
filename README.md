@@ -60,7 +60,7 @@ jpg/                    README 使用的手机界面截图
 
 运行环境：
 
-- 已安装并可执行 Droidspaces 核心程序。
+- 手动运行时需要已安装并可执行 Droidspaces 核心程序；Linux 一键安装脚本会直接从官方后端压缩包下载匹配的核心二进制，不使用 `.deb` 或 `apt`。
 - WebUI 进程需要访问 Droidspaces workspace；Android 一般需要通过 `su` 以 root 上下文启动。
 - `socketdEnabled: true` 时，WebUI 与 Droidspaces daemon 需要处于能连接同一 socket 的用户/SELinux 上下文。
 
@@ -200,11 +200,102 @@ Android `arm64` 对应 `arm64-v8a`，`armv7` 对应 `armeabi-v7a`；`amd64` 与 
 | `make linux-config` | 生成 Linux 标准配置 `output/webui.linux.json`。 |
 | `make android-config` | 生成 Android 标准配置 `output/webui.android.json`。 |
 | `make config-templates` | 同时生成 Linux 与 Android 两份配置模板。 |
+| `make package` | 编译全部发布架构，并生成支持 Droidspaces `v6.5.0` 的压缩发行包。 |
 | `make run` | 以 `output/webui.json` 运行开发服务。 |
 | `make test` | 运行全部 Go 单元与接口测试。 |
 | `make local-smoke` | 启动临时本地服务并验证主要 API/UI 静态资源。 |
 | `make android-smoke` | 推送 smoke 专用二进制/配置到已连接 Android 设备后验证 API。 |
 | `make clean` | 删除 `output/` 构建产物。 |
+
+### 二进制发行包
+
+首个发行包的运行时 WebUI 版本为 `v0.1.0-ds6.5.0`，目标核心版本为 Droidspaces `v6.5.0`：
+
+```sh
+make package
+```
+
+产物为：
+
+```text
+output/Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz
+output/Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz.sha256
+```
+
+压缩包不包含本机配置、容器、模板或 RootFS 缓存，仅包含九个 Linux/Android 架构二进制、两份标准配置、`README.md`、`install-linux.sh`、发行包声明的官方核心版本清单、发行说明和 `SHA256SUMS`。验证解压后的文件：
+
+```sh
+tar -xzf output/Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz -C /tmp
+cd /tmp/Droidspaces-WebUI-v0.1.0-ds6.5.0
+sha256sum -c SHA256SUMS
+```
+
+下载压缩包后，可先在 `output/` 或下载目录中验证归档本体：
+
+```sh
+sha256sum -c Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz.sha256
+```
+
+后续发行可覆盖版本号：
+
+```sh
+make package RELEASE_VERSION=v0.2.0
+```
+
+### Linux 自动安装
+
+仓库提供 [scripts/install-linux.sh](scripts/install-linux.sh)。它会按当前 Linux CPU 架构完成以下工作：
+
+- 从发行包声明的官方 [Droidspaces-OSS Release](https://github.com/ravindu644/Droidspaces-OSS/releases/latest) 下载后端压缩包，校验 GitHub API 提供的文件大小与 SHA-256 摘要，并只提取匹配架构的 `droidspaces` 二进制；不使用 `.deb`、`apt` 或系统包安装。
+- 从本项目 GitHub Release 下载并校验 WebUI。
+- 将核心和 WebUI 安装到 `/var/lib/Droidspaces/bin/`，创建 `/usr/sbin` 快捷链接，并写入、启用和启动 `droidspaces.service` 与 `droidspaces-webui.service`。两个服务异常退出时会由 systemd 自动重启。
+- 首次写入配置或使用 `--replace-config` 时，询问工作区、访问范围、监听端口和授权密钥。直接回车使用固定工作区 `/var/lib/Droidspaces`、公网监听 `0.0.0.0:9090`，并生成一个 8 位随机 Token。
+
+已有核心默认保留；只有传入 `--replace-core` 才会下载并替换它。已有配置默认也会保留。重复执行脚本时，正在运行的核心服务不会被默认重启；只有显式传入 `--restart-core` 才会中断并切换到新核心。
+
+先下载脚本后执行，便于先检查脚本内容：
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/loeveo/Droidspaces-WebUI/main/scripts/install-linux.sh
+sudo bash install-linux.sh
+```
+
+默认安装到 `/var/lib/Droidspaces/bin/droidspaces` 与 `/var/lib/Droidspaces/bin/droidspaces-webui`，首次安装时生成 `/var/lib/Droidspaces/webui.json`，并创建 `/usr/sbin/droidspaces`、`/usr/sbin/droidspaces-webui` 快捷链接。首次安装会显示初始设置确认，直接回车即使用公网 `0.0.0.0:9090` 与自动生成的 8 位 Token；安装完成时会显示该 Token 一次。已有二进制会备份；已有配置默认保留，因此重复执行脚本不会重新询问或改变访问设置。
+
+常用选项：
+
+```sh
+# 安装指定 WebUI Release 标签
+sudo bash install-linux.sh --version v0.1.0
+
+# 使用指定的官方 Droidspaces 核心版本，并显式替换已有核心
+sudo bash install-linux.sh --core-version v6.5.0 --replace-core
+
+# 更新核心后，明确允许重启核心服务以立即切换版本
+sudo bash install-linux.sh --core-version v6.5.0 --replace-core --restart-core
+
+# 不创建 /usr/sbin 快捷链接
+sudo bash install-linux.sh --no-symlink
+
+# 用 Release 的 Linux 标准模板替换已有配置（旧配置会自动备份）
+sudo bash install-linux.sh --replace-config
+
+# 自动化安装：跳过交互并使用默认公网设置与随机 Token
+# Token 仅写入权限为 0600 的 /var/lib/Droidspaces/webui.json，不输出到日志
+sudo bash install-linux.sh --non-interactive
+```
+
+默认会启用并启动两项服务，可立即检查状态：
+
+```sh
+sudo systemctl status droidspaces.service droidspaces-webui.service
+```
+
+官方 Linux 核心的工作区固定为 `/var/lib/Droidspaces`，因此安装脚本不接受其他 `--workspace` 值，以避免 WebUI 与核心的容器、日志和 PID 状态分裂。公网监听只配置 WebUI 的监听地址；防火墙放行、云安全组和路由器端口映射需由管理员自行设置。8 位随机 Token 适合作为首次安装凭据，长期公网暴露前应在 `webui.json` 中替换为更长的高强度 Token。若机器没有 systemd，脚本仍会安装已校验的二进制和配置，并提示跳过服务注册。若需要自行管理进程，传入 `--no-systemd`；若只想写入单元而不立即启动，传入 `--no-start`。完整参数说明：
+
+```sh
+bash install-linux.sh --help
+```
 
 ## Android 部署
 
