@@ -8,6 +8,8 @@
   "port": 9090,
   "authToken_说明": "Web API 授权密钥。public 模式留空时程序会生成 8 位临时密钥并打印到启动日志；local 模式也可以填写以增加保护。浏览器首次访问会提示输入该 token。",
   "authToken": "",
+  "uiLanguage_说明": "WebUI 界面语言。支持 zh-CN（简体中文，默认）和 en（英语）。若配置文件缺少该字段，首次访问 WebUI 时会询问并将选择写回配置文件；也可在系统设置中在线修改。",
+  "uiLanguage": "zh-CN",
   "droidspacesPath_说明": "Droidspaces 核心程序的完整路径。WebUI 的诊断命令会调用这个二进制。",
   "droidspacesPath": "/data/local/Droidspaces/bin/droidspaces",
   "corePath_说明": "Droidspaces 核心程序工作目录。不填写时默认取 droidspacesPath 的父目录。",
@@ -42,9 +44,11 @@
   "batteryStatsSampleSeconds": 3,
   "batteryStatsWriteMinutes_说明": "电池统计落盘写入间隔，单位分钟。未到写入时间的样本只保存在内存中，减少 UFS 写入；范围 5-1440，默认 5。",
   "batteryStatsWriteMinutes": 5,
+  "batteryStatsRetentionDays_说明": "电池统计按本地日期分文件保存。保留最近的天数，范围 1-365，默认 7；提高该值可主动保留更长历史。",
+  "batteryStatsRetentionDays": 7,
   "overviewRefreshSeconds_说明": "首页概览高频刷新间隔，单位秒。仅在浏览器停留在概览页且页面可见时生效，范围 1-60。",
   "overviewRefreshSeconds": 3,
-  "rootfsRepositories_说明": "RootFS 云端列表。普通仓库 URL 指向 rootfs.json；lxc-image 使用 Linux Containers 的 https://images.linuxcontainers.org/。在设置中启用 CN 加速时，现有 lxc-image 条目的 URL 会切换为 https://mirror.nju.edu.cn/lxc-images/，不会添加第二个来源；目录仍由官方读取，镜像文件从南京大学下载。可以添加多个其他仓库。",
+  "rootfsRepositories_说明": "RootFS 云端列表。简体中文的新配置默认使用 lxc-image 的南京大学镜像 https://mirror.nju.edu.cn/lxc-images/；英语的新配置默认使用 Linux Containers 官方源 https://images.linuxcontainers.org/。在设置中手动切换后，语言切换不会覆盖该选择。可以添加多个其他仓库。",
   "rootfsRepositories": [
     {
       "name": "Droidspaces Official",
@@ -52,7 +56,7 @@
     },
     {
       "name": "lxc-image",
-      "url": "https://images.linuxcontainers.org/"
+      "url": "https://mirror.nju.edu.cn/lxc-images/"
     }
   ]
 }

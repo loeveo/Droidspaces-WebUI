@@ -462,6 +462,32 @@ input[type="search"],
   width: min(420px, 42vw);
 }
 
+.language-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.language-select {
+  width: 88px;
+  min-width: 88px;
+  font-size: 12px;
+}
+
+.menu-language-control {
+  display: none;
+}
+
+.login-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.login-title-row h2 {
+  min-width: 0;
+}
+
 .table-wrap {
   overflow: auto;
 }
@@ -1047,6 +1073,60 @@ tr:hover td {
   }
 }
 
+@media (min-width: 621px) and (max-width: 760px) {
+  .topbar > .top-actions {
+    gap: 6px;
+  }
+
+  #taskOutputBtn {
+    display: none;
+  }
+
+  #taskStatusBtn,
+  #createBtn {
+    display: inline-grid;
+    place-items: center;
+    position: relative;
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+    min-height: 34px;
+    padding: 0;
+    font-size: 0;
+    line-height: 1;
+    overflow: hidden;
+    text-indent: -9999px;
+  }
+
+  #taskStatusBtn::before,
+  #createBtn::before {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    text-indent: 0;
+  }
+
+  #taskStatusBtn::before {
+    content: "◷";
+    color: var(--ink);
+    font-size: 19px;
+  }
+
+  #createBtn::before {
+    content: "+";
+    color: #fff;
+    font-size: 20px;
+  }
+
+  .language-select {
+    width: 70px;
+    min-width: 70px;
+    padding: 0 5px;
+    font-size: 11px;
+  }
+}
+
 .rootfs-source-toolbar {
   display: flex;
   align-items: center;
@@ -1430,7 +1510,8 @@ tr:hover td {
 }
 
 .modal-overlay,
-.login-overlay {
+.login-overlay,
+.locale-welcome-overlay {
   position: fixed;
   inset: 0;
   display: grid;
@@ -1448,6 +1529,11 @@ tr:hover td {
   background: rgba(18, 26, 22, 0.72);
 }
 
+.locale-welcome-overlay {
+  z-index: 120;
+  background: rgba(18, 26, 22, 0.76);
+}
+
 .modal-box,
 .login-box {
   border: 1px solid var(--line);
@@ -1456,6 +1542,44 @@ tr:hover td {
   box-shadow: var(--shadow);
   display: grid;
   gap: 14px;
+}
+
+.locale-welcome-box {
+  width: min(420px, 100%);
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 12px;
+}
+
+.locale-welcome-brand {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.locale-welcome-box h2,
+.locale-welcome-box p {
+  margin: 0;
+}
+
+.locale-welcome-box p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.locale-choice-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.locale-choice-btn {
+  min-height: 38px;
 }
 
 .modal-box {
@@ -4270,6 +4394,13 @@ input[type="search"],
     display: none;
   }
 
+  .language-select {
+    width: 70px;
+    min-width: 70px;
+    padding: 0 5px;
+    font-size: 11px;
+  }
+
   #taskStatusBtn {
     position: relative;
     display: block;
@@ -4362,6 +4493,35 @@ input[type="search"],
   }
 }
 
+@media (max-width: 400px) {
+  .locale-welcome-box {
+    padding: 20px;
+  }
+
+  .locale-choice-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-language-control {
+    display: none;
+  }
+
+  .menu-language-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px 2px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .menu-language-control .language-select {
+    width: 70px;
+    min-width: 70px;
+  }
+}
+
 /* Battery monitoring keeps live power state separate from historical samples. */
 .battery-metric #batteryMain {
   color: var(--ink);
@@ -4447,6 +4607,10 @@ input[type="search"],
 
 .battery-live-critical {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.battery-live-critical.power-split {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .battery-live-item {

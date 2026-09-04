@@ -1,5 +1,9 @@
 # Droidspaces WebUI
 
+<p align="right">
+  <a href="./README_EN.md"><kbd>English Documentation</kbd></a>
+</p>
+
 Droidspaces WebUI 是面向 Android 和 Linux 宿主机的本地容器管理界面。它以一个独立的 Go HTTP 服务提供浏览器界面，负责管理 Droidspaces 容器、RootFS 模板、网络、后台任务、终端和诊断信息。
 
 > 这是 root 级管理入口。请只在受信任设备和网络中运行；对局域网或公网监听时必须设置强 `authToken`。
@@ -222,7 +226,7 @@ output/Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz
 output/Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz.sha256
 ```
 
-压缩包不包含本机配置、容器、模板或 RootFS 缓存，仅包含九个 Linux/Android 架构二进制、两份标准配置、`README.md`、`install-linux.sh`、发行包声明的官方核心版本清单、发行说明和 `SHA256SUMS`。验证解压后的文件：
+压缩包不包含本机配置、容器、模板或 RootFS 缓存，仅包含九个 Linux/Android 架构二进制、两份标准配置、中英文说明文档（`README.md`、`README_EN.md`）、`install-linux.sh`、Android/Magisk 启动脚本 `android-start-webui.sh`、发行包声明的官方核心版本清单、发行说明和 `SHA256SUMS`。验证解压后的文件：
 
 ```sh
 tar -xzf output/Droidspaces-WebUI-v0.1.0-ds6.5.0.tar.gz -C /tmp
@@ -306,23 +310,42 @@ make android-arm64 android-config
 
 adb push output/droidspaces-webui-android-arm64 /data/local/tmp/droidspaces-webui
 adb push output/webui.android.json /data/local/tmp/webui.json
+adb push scripts/start-android-webui.sh /data/local/tmp/start-android-webui.sh
 
 adb shell su -c '
   mkdir -p /data/local/Droidspaces/bin &&
   cp /data/local/tmp/droidspaces-webui /data/local/Droidspaces/bin/droidspaces-webui &&
   cp /data/local/tmp/webui.json /data/local/Droidspaces/webui.json &&
-  chmod 755 /data/local/Droidspaces/bin/droidspaces-webui
+  cp /data/local/tmp/start-android-webui.sh /data/local/Droidspaces/bin/start-android-webui.sh &&
+  chmod 755 /data/local/Droidspaces/bin/droidspaces-webui /data/local/Droidspaces/bin/start-android-webui.sh
 '
 ```
 
-启动服务：
+使用启动脚本启动服务：
+
+```sh
+adb shell su -c /data/local/Droidspaces/bin/start-android-webui.sh
+```
+
+脚本默认在后台启动 `/data/local/Droidspaces/bin/droidspaces-webui --config /data/local/Droidspaces/webui.json`，将启动信息和 WebUI 输出追加到 `/data/local/Droidspaces/Logs/webui.log`，并记录 `/data/local/Droidspaces/webui.pid`。它通过 PID 和 `/proc/<pid>/cmdline` 核验已有实例，不会停止无法确认的进程，也不会重复启动同一份 WebUI。需要在前台排错时使用：
+
+```sh
+adb shell su -c '/data/local/Droidspaces/bin/start-android-webui.sh --foreground'
+```
+
+### Magisk 自启动
+
+已安装 Magisk 且设备具有 root 权限时，将同一启动脚本复制到 `service.d`：
 
 ```sh
 adb shell su -c '
-  cd /data/local/Droidspaces &&
-  ./bin/droidspaces-webui --config /data/local/Droidspaces/webui.json
+  mkdir -p /data/adb/service.d &&
+  cp /data/local/Droidspaces/bin/start-android-webui.sh /data/adb/service.d/droidspaces-webui.sh &&
+  chmod 755 /data/adb/service.d/droidspaces-webui.sh
 '
 ```
+
+脚本从 `service.d` 执行时会等待 `sys.boot_completed`（默认最长 180 秒）再启动；可在手动调用时使用 `--wait` 获得相同行为，或设置 `DS_WEBUI_BOOT_WAIT_TIMEOUT=0` 无限等待。不要在 `service.d` 中使用 `--foreground`，它用于交互式诊断。
 
 若在电脑浏览器访问，建立 ADB 端口转发：
 
@@ -330,7 +353,7 @@ adb shell su -c '
 adb forward tcp:9090 tcp:9090
 ```
 
-然后打开 `http://127.0.0.1:9090`。服务长期运行时，应由设备现有的启动脚本或服务管理方式托管，并把 stdout/stderr 重定向到 Droidspaces 日志目录。
+然后打开 `http://127.0.0.1:9090`。脚本使用配置文件中的监听地址和端口；通过电脑访问时仍需建立匹配端口的 ADB 转发。
 
 ### Android 冒烟测试
 
@@ -367,6 +390,7 @@ PUSH=0 make android-smoke
 | `mode` | `local` 固定监听本机；`public` 用于局域网或公网。 |
 | `host` / `port` | HTTP 监听地址与端口，默认 `127.0.0.1:9090`。 |
 | `authToken` | API Bearer Token。`public` 模式为空时会生成临时 8 位 token 并输出到启动日志；生产使用应写入固定强 token。 |
+| `uiLanguage` | WebUI 界面语言。支持 `zh-CN`（简体中文，默认）和 `en`（英语）。若配置文件缺少该字段，首次访问 WebUI 会询问语言并将选择写回配置文件；也可在“系统设置”中在线修改，切换后立即生效。 |
 | `droidspacesPath` | Droidspaces 核心二进制的完整路径。默认是 `workspace/bin/droidspaces`。 |
 | `corePath` | 核心二进制目录；为空时取 `droidspacesPath` 的父目录。默认是 `workspace/bin`。 |
 | `workspace` | Droidspaces 工作区。Android 默认 `/data/local/Droidspaces`，Linux 默认 `/var/lib/Droidspaces`。 |
@@ -384,12 +408,15 @@ PUSH=0 make android-smoke
 | `batteryDetailEnabled` | 保留的电池详细信息兼容字段。 |
 | `batteryStatsSampleSeconds` | 电池统计采样周期，范围 `1-60` 秒。 |
 | `batteryStatsWriteMinutes` | 电池统计写盘周期，范围 `5-1440` 分钟。 |
+| `batteryStatsRetentionDays` | 功耗历史按本地日期分文件保存；保留最近 `1-365` 天，默认 `7` 天。提高该值可主动保留更长历史。 |
 | `overviewRefreshSeconds` | 概览页可见时的刷新周期，范围 `1-60` 秒。 |
 | `rootfsRepositories` | 云端 RootFS 仓库列表。默认包含 Droidspaces Official 和 lxc-image。 |
 
 标准模板分别是 [config/webui.linux.example.json](config/webui.linux.example.json) 与 [config/webui.android.example.json](config/webui.android.example.json)。旧的 [config/webui.example.json](config/webui.example.json) 保留为 Android 兼容路径。示例内的 `_说明` 或 `*_说明` 字段会被程序忽略。
 
 ### lxc-image CN 加速
+
+简体中文的新配置默认启用南京大学 lxc-image 镜像；英语新配置默认使用官方源。已在系统设置中手动选择的来源会被保留，不会因切换界面语言而覆盖。
 
 在 WebUI 的系统设置中启用 CN 加速后，lxc-image 会从：
 
@@ -425,6 +452,7 @@ DS_WEBUI_HOST
 DS_WEBUI_PORT
 DS_WEBUI_DROIDSPACES
 DS_WEBUI_AUTH_TOKEN
+DS_WEBUI_UI_LANGUAGE
 DS_WEBUI_WORKSPACE
 DS_WEBUI_CORE_PATH
 DS_WEBUI_IMAGE_ROOT
@@ -439,6 +467,7 @@ DS_WEBUI_BATTERY_SERIES_CELLS
 DS_WEBUI_BATTERY_DETAIL_ENABLED
 DS_WEBUI_BATTERY_STATS_SAMPLE_SECONDS
 DS_WEBUI_BATTERY_STATS_WRITE_MINUTES
+DS_WEBUI_BATTERY_STATS_RETENTION_DAYS
 DS_WEBUI_OVERVIEW_REFRESH_SECONDS
 ```
 
@@ -508,7 +537,7 @@ make local-smoke
 确认后，先查看将被提交的内容，再按实际变更选择暂存文件：
 
 ```sh
-git add README.md jpg/
+git add README.md README_EN.md jpg/
 git diff --cached --check
 git commit -m 'Document Droidspaces WebUI build and deployment'
 ```

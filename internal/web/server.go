@@ -58,6 +58,8 @@ type Server struct {
 	webVersion                          string
 	supportedCoreVersion                string
 	authToken                           string
+	uiLanguage                          string
+	uiLanguageConfigured                bool
 	workspace                           string
 	configPath                          string
 	mode                                string
@@ -67,6 +69,7 @@ type Server struct {
 	imageRoot                           string
 	templateImageRoot                   string
 	rootfsRepos                         []config.RootfsRepository
+	rootfsReposConfigured               bool
 	rootfsClient                        *rootfs.Client
 	rootfsSkipTLSVerify                 bool
 	rootfsCacheMu                       sync.RWMutex
@@ -89,76 +92,82 @@ type Server struct {
 	disableNATCompatRuntime             bool
 	// nestedAndroidNATCommand is injected by tests. Production always uses
 	// fixed executable names and arguments from nat_compat.go.
-	nestedAndroidNATCommand  natCompatCommandRunner
-	batteryDirectPower       bool
-	batterySeriesCells       int
-	overviewPowerEnabled     bool
-	batteryMonitoringEnabled bool
-	batteryFeatureMu         sync.RWMutex
-	batterySamplerMu         sync.Mutex
-	batterySamplerCtx        context.Context
-	batterySamplerCancel     context.CancelFunc
-	batterySamplerDone       chan struct{}
-	disableBatterySampler    bool
-	batteryDetailEnabled     bool
-	batteryStatsSampleSecs   int64
-	batteryStatsWriteMins    int64
-	overviewRefreshSecs      int
-	configMu                 sync.Mutex
-	containerConfigMu        sync.Mutex
-	containerDistroMu        sync.Mutex
-	natIPMu                  sync.Mutex
-	natIPReservations        map[string]string
-	portForwardMu            sync.Mutex
-	portForwardReservations  map[string][]socketd.Port
-	containerDistroCache     map[string]containerDistroCacheEntry
-	backendDiagnosticsMu     sync.Mutex
-	backendDiagnostics       []backendDiagnosticEntry
-	tasksMu                  sync.RWMutex
-	tasks                    map[string]*taskState
-	containerTaskMu          sync.Mutex
-	containerTasks           map[string]string
-	hostStatsMu              sync.Mutex
-	lastCPUSample            cpuSample
-	batteryStatsMu           sync.Mutex
-	batteryStats             batteryStatsState
-	coreVersionMu            sync.Mutex
-	detectedCoreVersion      string
-	coreVersionCheckedAt     time.Time
-	coreUpdateMu             sync.Mutex
-	coreUpdateRunning        bool
-	coreUpdateHTTPClient     *http.Client
+	nestedAndroidNATCommand   natCompatCommandRunner
+	batteryDirectPower        bool
+	batterySeriesCells        int
+	overviewPowerEnabled      bool
+	batteryMonitoringEnabled  bool
+	batteryFeatureMu          sync.RWMutex
+	batterySamplerMu          sync.Mutex
+	batterySamplerCtx         context.Context
+	batterySamplerCancel      context.CancelFunc
+	batterySamplerDone        chan struct{}
+	disableBatterySampler     bool
+	batteryDetailEnabled      bool
+	batteryStatsSampleSecs    int64
+	batteryStatsWriteMins     int64
+	batteryStatsRetentionDays int64
+	overviewRefreshSecs       int
+	systemSettingsMu          sync.RWMutex
+	configMu                  sync.Mutex
+	containerConfigMu         sync.Mutex
+	containerDistroMu         sync.Mutex
+	natIPMu                   sync.Mutex
+	natIPReservations         map[string]string
+	portForwardMu             sync.Mutex
+	portForwardReservations   map[string][]socketd.Port
+	containerDistroCache      map[string]containerDistroCacheEntry
+	backendDiagnosticsMu      sync.Mutex
+	backendDiagnostics        []backendDiagnosticEntry
+	tasksMu                   sync.RWMutex
+	tasks                     map[string]*taskState
+	containerTaskMu           sync.Mutex
+	containerTasks            map[string]string
+	hostStatsMu               sync.Mutex
+	lastCPUSample             cpuSample
+	batteryStatsMu            sync.Mutex
+	batteryStats              batteryStatsState
+	coreVersionMu             sync.Mutex
+	detectedCoreVersion       string
+	coreVersionCheckedAt      time.Time
+	coreUpdateMu              sync.Mutex
+	coreUpdateRunning         bool
+	coreUpdateHTTPClient      *http.Client
 }
 
 type Options struct {
-	DroidspacesPath             string
-	WebVersion                  string
-	SupportedCoreVersion        string
-	AuthToken                   string
-	Workspace                   string
-	ConfigPath                  string
-	Mode                        string
-	Host                        string
-	Port                        int
-	CorePath                    string
-	ImageRoot                   string
-	TemplateImageRoot           string
-	RootfsRepos                 []config.RootfsRepository
-	RootfsSkipTLSVerify         bool
-	DefaultNATCIDR              string
-	DefaultNATThirdOctet        int
-	NestedAndroidNATCompat      bool
-	BatteryDirectPower          bool
-	BatterySeriesCells          int
-	OverviewPowerEnabled        *bool
-	BatteryMonitoringEnabled    *bool
-	BatteryDetailEnabled        *bool
-	BatteryStatsSampleSecs      int
-	BatteryStatsWriteMins       int
-	OverviewRefreshSecs         int
-	SocketdEnabled              bool
-	DisableBatterySampler       bool
-	DisableRootfsCatalogRefresh bool
+	DroidspacesPath              string
+	WebVersion                   string
+	SupportedCoreVersion         string
+	AuthToken                    string
+	UILanguage                   string
+	UILanguageConfigured         bool
+	Workspace                    string
+	ConfigPath                   string
+	Mode                         string
+	Host                         string
+	Port                         int
+	CorePath                     string
+	ImageRoot                    string
+	TemplateImageRoot            string
+	RootfsRepos                  []config.RootfsRepository
+	RootfsRepositoriesConfigured bool
+	RootfsSkipTLSVerify          bool
+	DefaultNATCIDR               string
+	DefaultNATThirdOctet         int
+	NestedAndroidNATCompat       bool
+	BatteryDirectPower           bool
+	BatterySeriesCells           int
+	OverviewPowerEnabled         *bool
+	BatteryMonitoringEnabled     *bool
+	BatteryDetailEnabled         *bool
+	BatteryStatsSampleSecs       int
+	BatteryStatsWriteMins        int
+	BatteryStatsRetentionDays    int
+	OverviewRefreshSecs          int
+	SocketdEnabled               bool
+	DisableBatterySampler        bool
+	DisableRootfsCatalogRefresh  bool
 }
 
 type apiError struct {
@@ -408,56 +417,64 @@ type networkSettingsRequest struct {
 	DefaultNATThirdOctet int    `json:"defaultNatThirdOctet"`
 }
 
+type uiLanguageRequest struct {
+	UILanguage string `json:"uiLanguage"`
+}
+
 type systemSettingsRequest struct {
-	Mode                     string                    `json:"mode"`
-	Host                     string                    `json:"host"`
-	Port                     int                       `json:"port"`
-	AuthToken                string                    `json:"authToken"`
-	DroidspacesPath          string                    `json:"droidspacesPath"`
-	CorePath                 string                    `json:"corePath"`
-	ImageRoot                string                    `json:"imageRoot"`
-	TemplateImageRoot        string                    `json:"templateImageRoot"`
-	Workspace                string                    `json:"workspace"`
-	SocketdEnabled           *bool                     `json:"socketdEnabled"`
-	RootfsSkipTLSVerify      *bool                     `json:"rootfsSkipTLSVerify"`
-	DefaultNATCIDR           string                    `json:"defaultNatCIDR"`
-	DefaultNATThirdOctet     int                       `json:"defaultNatThirdOctet"`
-	NestedAndroidNATCompat   *bool                     `json:"nestedAndroidNatCompat"`
-	BatteryDirectPower       *bool                     `json:"batteryDirectPowerSupported"`
-	BatterySeriesCells       *int                      `json:"batterySeriesCells"`
-	OverviewPowerEnabled     *bool                     `json:"overviewPowerEnabled"`
-	BatteryMonitoringEnabled *bool                     `json:"batteryMonitoringEnabled"`
-	BatteryDetailEnabled     *bool                     `json:"batteryDetailEnabled"`
-	BatteryStatsSampleSecs   int                       `json:"batteryStatsSampleSeconds"`
-	BatteryStatsWriteMins    int                       `json:"batteryStatsWriteMinutes"`
-	OverviewRefreshSecs      int                       `json:"overviewRefreshSeconds"`
-	RootfsRepositories       []config.RootfsRepository `json:"rootfsRepositories"`
+	Mode                      string                    `json:"mode"`
+	Host                      string                    `json:"host"`
+	Port                      int                       `json:"port"`
+	AuthToken                 string                    `json:"authToken"`
+	UILanguage                string                    `json:"uiLanguage"`
+	DroidspacesPath           string                    `json:"droidspacesPath"`
+	CorePath                  string                    `json:"corePath"`
+	ImageRoot                 string                    `json:"imageRoot"`
+	TemplateImageRoot         string                    `json:"templateImageRoot"`
+	Workspace                 string                    `json:"workspace"`
+	SocketdEnabled            *bool                     `json:"socketdEnabled"`
+	RootfsSkipTLSVerify       *bool                     `json:"rootfsSkipTLSVerify"`
+	DefaultNATCIDR            string                    `json:"defaultNatCIDR"`
+	DefaultNATThirdOctet      int                       `json:"defaultNatThirdOctet"`
+	NestedAndroidNATCompat    *bool                     `json:"nestedAndroidNatCompat"`
+	BatteryDirectPower        *bool                     `json:"batteryDirectPowerSupported"`
+	BatterySeriesCells        *int                      `json:"batterySeriesCells"`
+	OverviewPowerEnabled      *bool                     `json:"overviewPowerEnabled"`
+	BatteryMonitoringEnabled  *bool                     `json:"batteryMonitoringEnabled"`
+	BatteryDetailEnabled      *bool                     `json:"batteryDetailEnabled"`
+	BatteryStatsSampleSecs    int                       `json:"batteryStatsSampleSeconds"`
+	BatteryStatsWriteMins     int                       `json:"batteryStatsWriteMinutes"`
+	BatteryStatsRetentionDays int                       `json:"batteryStatsRetentionDays"`
+	OverviewRefreshSecs       int                       `json:"overviewRefreshSeconds"`
+	RootfsRepositories        []config.RootfsRepository `json:"rootfsRepositories"`
 }
 
 type normalizedSystemSettings struct {
-	Mode                     string
-	Host                     string
-	Port                     int
-	AuthToken                string
-	DroidspacesPath          string
-	CorePath                 string
-	ImageRoot                string
-	TemplateImageRoot        string
-	Workspace                string
-	SocketdEnabled           bool
-	RootfsSkipTLSVerify      bool
-	DefaultNATCIDR           string
-	DefaultNATThirdOctet     int
-	NestedAndroidNATCompat   bool
-	BatteryDirectPower       bool
-	BatterySeriesCells       int
-	OverviewPowerEnabled     bool
-	BatteryMonitoringEnabled bool
-	BatteryDetailEnabled     bool
-	BatteryStatsSampleSecs   int
-	BatteryStatsWriteMins    int
-	OverviewRefreshSecs      int
-	RootfsRepositories       []config.RootfsRepository
+	Mode                      string
+	Host                      string
+	Port                      int
+	AuthToken                 string
+	UILanguage                string
+	DroidspacesPath           string
+	CorePath                  string
+	ImageRoot                 string
+	TemplateImageRoot         string
+	Workspace                 string
+	SocketdEnabled            bool
+	RootfsSkipTLSVerify       bool
+	DefaultNATCIDR            string
+	DefaultNATThirdOctet      int
+	NestedAndroidNATCompat    bool
+	BatteryDirectPower        bool
+	BatterySeriesCells        int
+	OverviewPowerEnabled      bool
+	BatteryMonitoringEnabled  bool
+	BatteryDetailEnabled      bool
+	BatteryStatsSampleSecs    int
+	BatteryStatsWriteMins     int
+	BatteryStatsRetentionDays int
+	OverviewRefreshSecs       int
+	RootfsRepositories        []config.RootfsRepository
 }
 
 type sparseRequest struct {
@@ -571,32 +588,39 @@ type batteryReport struct {
 	InputCurrentMA      float64 `json:"inputCurrentMa"`
 	InputVoltageV       float64 `json:"inputVoltageV"`
 	InputPowerW         float64 `json:"inputPowerW"`
+	// ChargingPowerW is the positive battery-side power while the pack is
+	// charging. BoardPowerEstimateW is the remaining external input after that
+	// battery-side charge power; it necessarily includes conversion losses.
+	ChargingPowerW      float64 `json:"chargingPowerW"`
+	BoardPowerEstimateW float64 `json:"boardPowerEstimateW"`
 	// InputPowerKind describes how InputPowerW was obtained. A PD contract is
 	// useful diagnostic information, but is not a measurement of device load.
-	InputPowerKind  string             `json:"inputPowerKind,omitempty"`
-	InputOnline     bool               `json:"inputOnline"`
-	TemperatureC    float64            `json:"temperatureC"`
-	HasCapacity     bool               `json:"hasCapacity"`
-	HasCurrent      bool               `json:"hasCurrent"`
-	HasVoltage      bool               `json:"hasVoltage"`
-	HasPower        bool               `json:"hasPower"`
-	HasCharge       bool               `json:"hasCharge"`
-	HasFullCharge   bool               `json:"hasFullCharge"`
-	HasDesignCharge bool               `json:"hasDesignCharge"`
-	HasEnergy       bool               `json:"hasEnergy"`
-	HasFullEnergy   bool               `json:"hasFullEnergy"`
-	HasDesignEnergy bool               `json:"hasDesignEnergy"`
-	HasHealth       bool               `json:"hasHealth"`
-	HasInputCurrent bool               `json:"hasInputCurrent"`
-	HasInputVoltage bool               `json:"hasInputVoltage"`
-	HasInputPower   bool               `json:"hasInputPower"`
-	HasTemperature  bool               `json:"hasTemperature"`
-	CurrentSource   string             `json:"currentSource,omitempty"`
-	VoltageSource   string             `json:"voltageSource,omitempty"`
-	PowerSource     string             `json:"powerSource,omitempty"`
-	InputSource     string             `json:"inputSource,omitempty"`
-	Summary         string             `json:"summary"`
-	Stats           batteryStatsReport `json:"stats"`
+	InputPowerKind        string             `json:"inputPowerKind,omitempty"`
+	InputOnline           bool               `json:"inputOnline"`
+	TemperatureC          float64            `json:"temperatureC"`
+	HasCapacity           bool               `json:"hasCapacity"`
+	HasCurrent            bool               `json:"hasCurrent"`
+	HasVoltage            bool               `json:"hasVoltage"`
+	HasPower              bool               `json:"hasPower"`
+	HasCharge             bool               `json:"hasCharge"`
+	HasFullCharge         bool               `json:"hasFullCharge"`
+	HasDesignCharge       bool               `json:"hasDesignCharge"`
+	HasEnergy             bool               `json:"hasEnergy"`
+	HasFullEnergy         bool               `json:"hasFullEnergy"`
+	HasDesignEnergy       bool               `json:"hasDesignEnergy"`
+	HasHealth             bool               `json:"hasHealth"`
+	HasInputCurrent       bool               `json:"hasInputCurrent"`
+	HasInputVoltage       bool               `json:"hasInputVoltage"`
+	HasInputPower         bool               `json:"hasInputPower"`
+	HasChargingPower      bool               `json:"hasChargingPower"`
+	HasBoardPowerEstimate bool               `json:"hasBoardPowerEstimate"`
+	HasTemperature        bool               `json:"hasTemperature"`
+	CurrentSource         string             `json:"currentSource,omitempty"`
+	VoltageSource         string             `json:"voltageSource,omitempty"`
+	PowerSource           string             `json:"powerSource,omitempty"`
+	InputSource           string             `json:"inputSource,omitempty"`
+	Summary               string             `json:"summary"`
+	Stats                 batteryStatsReport `json:"stats"`
 }
 
 type batteryStatsReport struct {
@@ -673,29 +697,26 @@ type batteryPowerRangeSample struct {
 }
 
 type batteryStatsState struct {
-	path                  string
-	checkpointPath        string
-	loaded                bool
-	sampleCount           int
-	lastSample            batteryStatsSample
-	hasLastSample         bool
-	pendingSamples        []batteryStatsSample
-	pendingSince          int64
-	lastFlushTime         int64
-	chargeWh              float64
-	dischargeWh           float64
-	inputWh               float64
-	chargeMah             float64
-	dischargeMah          float64
-	usableWhWeightedSum   float64
-	usableWhWeight        float64
-	trackedRemainingWh    float64
-	hasTrackedRemaining   bool
-	trackedSource         string
-	loadedFromCheckpoint  bool
-	checkpointSampleTime  int64
-	checkpointSampleCount int
-	storageError          string
+	path                string
+	loaded              bool
+	sampleCount         int
+	lastSample          batteryStatsSample
+	hasLastSample       bool
+	pendingSamples      []batteryStatsSample
+	pendingSince        int64
+	lastFlushTime       int64
+	chargeWh            float64
+	dischargeWh         float64
+	inputWh             float64
+	chargeMah           float64
+	dischargeMah        float64
+	usableWhWeightedSum float64
+	usableWhWeight      float64
+	trackedRemainingWh  float64
+	hasTrackedRemaining bool
+	trackedSource       string
+	storageSignature    string
+	storageError        string
 }
 
 type batteryStatsSample struct {
@@ -729,49 +750,37 @@ type batteryStatsSample struct {
 	HasHealth        bool    `json:"hasHealth,omitempty"`
 }
 
-type batteryStatsCheckpoint struct {
-	Version              int                `json:"version"`
-	UpdatedAt            int64              `json:"updatedAt"`
-	SampleCount          int                `json:"sampleCount"`
-	LastSample           batteryStatsSample `json:"lastSample"`
-	HasLastSample        bool               `json:"hasLastSample"`
-	ChargeWh             float64            `json:"chargeWh"`
-	DischargeWh          float64            `json:"dischargeWh"`
-	InputWh              float64            `json:"inputWh"`
-	ChargeMah            float64            `json:"chargeMah"`
-	DischargeMah         float64            `json:"dischargeMah"`
-	UsableWhWeightedSum  float64            `json:"usableWhWeightedSum"`
-	UsableWhWeight       float64            `json:"usableWhWeight"`
-	TrackedRemainingWh   float64            `json:"trackedRemainingWh"`
-	HasTrackedRemaining  bool               `json:"hasTrackedRemaining"`
-	TrackedSource        string             `json:"trackedSource,omitempty"`
-	CheckpointSampleTime int64              `json:"checkpointSampleTime"`
-}
-
 const defaultContainerCgroupRoot = "/sys/fs/cgroup/droidspaces"
 
 var powerSupplyRoot = "/sys/class/power_supply"
 var configuredBatterySeriesCells int
 
 const (
-	minRootfsImageSizeGB     = 4
-	defaultRootfsImageSizeGB = 8
-	maxRootfsImageSizeGB     = 512
-	batteryStatsFileName     = "battery_stats.jsonl"
-	batteryStatsDBFileName   = "battery_stats_state.json"
+	minRootfsImageSizeGB      = 4
+	defaultRootfsImageSizeGB  = 8
+	maxRootfsImageSizeGB      = 512
+	batteryStatsFileName      = "battery_stats.jsonl"      // Legacy single-file store; never read by the daily store.
+	batteryStatsDBFileName    = "battery_stats_state.json" // Legacy checkpoint; never read by the daily store.
+	batteryStatsDirectoryName = "battery-stats"
 )
 
 const (
-	batteryStatsDefaultSampleSeconds    = 3
-	batteryStatsMinSampleSeconds        = 1
-	batteryStatsMaxSampleSeconds        = 60
-	batteryStatsDefaultWriteMinutes     = 5
-	batteryStatsMinWriteMinutes         = 5
-	batteryStatsMaxWriteMinutes         = 1440
-	batteryStatsCheckpointVersion       = 1
-	batteryStatsMaxSampleGap            = 15 * time.Minute
-	batteryStatsMinPowerW               = 0.01
-	batteryStatsMinCurrentMA            = 1
+	batteryStatsDefaultSampleSeconds = 3
+	batteryStatsMinSampleSeconds     = 1
+	batteryStatsMaxSampleSeconds     = 60
+	batteryStatsDefaultWriteMinutes  = 5
+	batteryStatsMinWriteMinutes      = 5
+	batteryStatsMaxWriteMinutes      = 1440
+	batteryStatsDefaultRetentionDays = 7
+	batteryStatsMinRetentionDays     = 1
+	batteryStatsMaxRetentionDays     = 365
+	batteryStatsMaxPowerRangeHours   = batteryStatsMaxRetentionDays * 24
+	batteryStatsMaxSampleGap         = 15 * time.Minute
+	batteryStatsMinPowerW            = 0.01
+	batteryStatsMinCurrentMA         = 1
+	// Input and battery telemetry are sampled independently. Permit a small
+	// negative difference before treating the derived board power as invalid.
+	batteryBoardPowerToleranceW         = 0.15
 	batteryStatsMinCapacityDeltaPercent = 0.5
 	batteryStatsMaxEstimatedUsableWh    = 500
 )
@@ -943,6 +952,10 @@ func NewServer(opts Options) (*Server, error) {
 	if supportedCoreVersion == "" {
 		supportedCoreVersion = DefaultSupportedCoreVersion
 	}
+	uiLanguage, err := config.NormalizeUILanguage(opts.UILanguage)
+	if err != nil {
+		return nil, err
+	}
 
 	defaultNATCIDR := strings.TrimSpace(opts.DefaultNATCIDR)
 	if defaultNATCIDR == "" {
@@ -989,6 +1002,13 @@ func NewServer(opts Options) (*Server, error) {
 	if batteryStatsWriteMins < batteryStatsMinWriteMinutes || batteryStatsWriteMins > batteryStatsMaxWriteMinutes {
 		return nil, fmt.Errorf("batteryStatsWriteMinutes must be between %d and %d", batteryStatsMinWriteMinutes, batteryStatsMaxWriteMinutes)
 	}
+	batteryStatsRetentionDays := opts.BatteryStatsRetentionDays
+	if batteryStatsRetentionDays <= 0 {
+		batteryStatsRetentionDays = batteryStatsDefaultRetentionDays
+	}
+	if batteryStatsRetentionDays < batteryStatsMinRetentionDays || batteryStatsRetentionDays > batteryStatsMaxRetentionDays {
+		return nil, fmt.Errorf("batteryStatsRetentionDays must be between %d and %d", batteryStatsMinRetentionDays, batteryStatsMaxRetentionDays)
+	}
 	batteryDetailEnabled := true
 	if opts.BatteryDetailEnabled != nil {
 		batteryDetailEnabled = *opts.BatteryDetailEnabled
@@ -1006,6 +1026,7 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	configuredBatterySeriesCells = opts.BatterySeriesCells
 
+	rootfsRepos := config.EnsureDefaultRootfsRepositoriesForUILanguage(opts.RootfsRepos, uiLanguage)
 	srv := &Server{
 		socketd:                     socketd.NewClient(6 * time.Second),
 		coreUpdateHTTPClient:        newCoreUpdateHTTPClient(),
@@ -1014,6 +1035,8 @@ func NewServer(opts Options) (*Server, error) {
 		webVersion:                  webVersion,
 		supportedCoreVersion:        supportedCoreVersion,
 		authToken:                   opts.AuthToken,
+		uiLanguage:                  uiLanguage,
+		uiLanguageConfigured:        opts.UILanguageConfigured,
 		workspace:                   workspace,
 		configPath:                  opts.ConfigPath,
 		mode:                        mode,
@@ -1022,7 +1045,8 @@ func NewServer(opts Options) (*Server, error) {
 		corePath:                    corePath,
 		imageRoot:                   imageRoot,
 		templateImageRoot:           templateImageRoot,
-		rootfsRepos:                 config.EnsureDefaultRootfsRepositories(opts.RootfsRepos),
+		rootfsRepos:                 rootfsRepos,
+		rootfsReposConfigured:       opts.RootfsRepositoriesConfigured,
 		rootfsClient:                rootfs.NewClient(opts.RootfsSkipTLSVerify),
 		rootfsSkipTLSVerify:         opts.RootfsSkipTLSVerify,
 		cgroupRoot:                  defaultContainerCgroupRoot,
@@ -1037,6 +1061,7 @@ func NewServer(opts Options) (*Server, error) {
 		batteryDetailEnabled:        batteryDetailEnabled,
 		batteryStatsSampleSecs:      int64(batteryStatsSampleSecs),
 		batteryStatsWriteMins:       int64(batteryStatsWriteMins),
+		batteryStatsRetentionDays:   int64(batteryStatsRetentionDays),
 		overviewRefreshSecs:         overviewRefreshSecs,
 		disableBatterySampler:       opts.DisableBatterySampler,
 		disableRootfsCatalogRefresh: opts.DisableRootfsCatalogRefresh,
@@ -1063,6 +1088,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("/api/core/update", s.withAuth(s.handleCoreUpdate))
 	mux.HandleFunc("/api/settings", s.withAuth(s.handleSystemSettings))
+	mux.HandleFunc("/api/settings/ui-language", s.withAuth(s.handleUILanguageSettings))
 	mux.HandleFunc("/api/containers", s.withAuth(s.handleContainers))
 	mux.HandleFunc("/api/containers/", s.withAuth(s.handleContainer))
 	mux.HandleFunc("/api/boot-priority", s.withAuth(s.handleBootPriority))
@@ -1100,12 +1126,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
 		return
 	}
-	if s.authToken == "" {
+	authToken := s.currentAuthToken()
+	if authToken == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "authEnabled": false})
 		return
 	}
 	got := s.requestToken(r)
-	if got != s.authToken {
+	if got != authToken {
 		writeJSON(w, http.StatusUnauthorized, apiError{Error: "missing or invalid auth token"})
 		return
 	}
@@ -1114,15 +1141,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.authToken != "" {
+		authToken := s.currentAuthToken()
+		if authToken != "" {
 			got := s.requestToken(r)
-			if got != s.authToken {
+			if got != authToken {
 				writeJSON(w, http.StatusUnauthorized, apiError{Error: "missing or invalid auth token"})
 				return
 			}
 		}
 		next(w, r)
 	}
+}
+
+func (s *Server) currentAuthToken() string {
+	s.systemSettingsMu.RLock()
+	defer s.systemSettingsMu.RUnlock()
+	return s.authToken
 }
 
 func (s *Server) requestToken(r *http.Request) string {
@@ -1147,7 +1181,12 @@ func (s *Server) injectIndexConfig(next http.Handler) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		configScript := fmt.Sprintf(`<script>window.DS_AUTH_REQUIRED = %t;</script>`, s.authToken != "")
+		s.systemSettingsMu.RLock()
+		authRequired := s.authToken != ""
+		uiLanguage := s.uiLanguage
+		uiLanguageConfigured := s.uiLanguageConfigured
+		s.systemSettingsMu.RUnlock()
+		configScript := fmt.Sprintf(`<script>window.DS_AUTH_REQUIRED = %t; window.DS_UI_LANGUAGE_DEFAULT = %s; window.DS_UI_LANGUAGE_CONFIGURED = %t;</script>`, authRequired, strconv.Quote(uiLanguage), uiLanguageConfigured)
 		index = bytes.Replace(index, []byte("</head>"), []byte(configScript+"</head>"), 1)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(index)
@@ -1176,9 +1215,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
 	defer cancel()
 	versionCtx, versionCancel := context.WithTimeout(r.Context(), 3*time.Second)
+	s.systemSettingsMu.RLock()
 	coreVersion := s.runtimeCoreVersion(versionCtx)
+	s.systemSettingsMu.RUnlock()
 	versionCancel()
 
+	s.systemSettingsMu.RLock()
+	s.rootfsCacheMu.Lock()
+	rootfsRepoCount := len(s.rootfsRepos)
+	s.rootfsCacheMu.Unlock()
+	socketdEnabled := s.socketdEnabled
+	workspacePath := s.workspace
 	status := map[string]any{
 		"backend":                     "unreachable",
 		"mode":                        s.mode,
@@ -1192,7 +1239,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"corePath":                    s.corePath,
 		"imageRoot":                   s.imageRoot,
 		"templateImageRoot":           s.templateImageRoot,
-		"rootfsRepoCount":             len(s.rootfsRepos),
+		"rootfsRepoCount":             rootfsRepoCount,
 		"rootfsSkipTLSVerify":         s.rootfsSkipTLSVerify,
 		"isAndroid":                   config.IsAndroid(),
 		"defaultNatCIDR":              s.defaultNATCIDR,
@@ -1203,16 +1250,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"batteryDetailEnabled":        s.batteryDetailEnabled,
 		"batteryStatsSampleSeconds":   s.batteryStatsSampleSeconds(),
 		"batteryStatsWriteMinutes":    s.batteryStatsWriteMinutes(),
+		"batteryStatsRetentionDays":   s.batteryStatsRetentionDaysSetting(),
 		"socketdEnabled":              s.socketdEnabled,
 		"workspace":                   s.workspace,
 		"authEnabled":                 s.authToken != "",
 		"listenHint":                  "local 模式仅监听本机；public 模式建议配置固定 authToken",
 		"backendErrors":               s.backendDiagnosticLog(),
 	}
+	s.systemSettingsMu.RUnlock()
 
-	if !s.socketdEnabled {
+	if !socketdEnabled {
 		status["backend"] = "socketd-disabled"
-		if snap, snapErr := workspace.ReadSnapshot(s.workspace, true); snapErr == nil {
+		if snap, snapErr := workspace.ReadSnapshot(workspacePath, true); snapErr == nil {
 			status["info"] = snap.Info
 			status["fallbackSource"] = snap.Source
 		} else {
@@ -1226,11 +1275,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.recordBackendDiagnostic("status/socketd-ping", err)
 		status["backendError"] = err.Error()
 		status["backendErrorHint"] = backendErrorHint(err)
-		if snap, cliErr := s.cliSnapshot(ctx, true); cliErr == nil {
+		s.systemSettingsMu.RLock()
+		snap, cliErr := s.cliSnapshot(ctx, true)
+		s.systemSettingsMu.RUnlock()
+		if cliErr == nil {
 			status["backend"] = "cli-fallback"
 			status["info"] = snap.Info
 			status["fallbackSource"] = snap.Source
-		} else if snap, snapErr := workspace.ReadSnapshot(s.workspace, true); snapErr == nil {
+		} else if snap, snapErr := workspace.ReadSnapshot(workspacePath, true); snapErr == nil {
 			status["backend"] = "workspace-fallback"
 			status["info"] = snap.Info
 			status["fallbackSource"] = snap.Source
@@ -1249,7 +1301,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if info, err := s.socketd.Info(ctx); err == nil {
 		status["info"] = info
-	} else if snap, snapErr := workspace.ReadSnapshot(s.workspace, true); snapErr == nil {
+	} else if snap, snapErr := workspace.ReadSnapshot(workspacePath, true); snapErr == nil {
 		status["info"] = snap.Info
 		status["fallbackSource"] = snap.Source
 	}
@@ -1881,13 +1933,18 @@ func (s *Server) handleRootfsList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.systemSettingsResponse(false, false))
+		s.systemSettingsMu.RLock()
+		response := s.systemSettingsResponse(false, false)
+		s.systemSettingsMu.RUnlock()
+		writeJSON(w, http.StatusOK, response)
 	case http.MethodPut, http.MethodPost:
 		var req systemSettingsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid json body"})
 			return
 		}
+		s.systemSettingsMu.Lock()
+		defer s.systemSettingsMu.Unlock()
 		settings, err := s.normalizeSystemSettings(req)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
@@ -1899,6 +1956,7 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			data["host"] = settings.Host
 			data["port"] = settings.Port
 			data["authToken"] = settings.AuthToken
+			data["uiLanguage"] = settings.UILanguage
 			data["droidspacesPath"] = settings.DroidspacesPath
 			data["corePath"] = settings.CorePath
 			data["imageRoot"] = settings.ImageRoot
@@ -1916,6 +1974,7 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 			data["batteryDetailEnabled"] = settings.BatteryDetailEnabled
 			data["batteryStatsSampleSeconds"] = settings.BatteryStatsSampleSecs
 			data["batteryStatsWriteMinutes"] = settings.BatteryStatsWriteMins
+			data["batteryStatsRetentionDays"] = settings.BatteryStatsRetentionDays
 			data["overviewRefreshSeconds"] = settings.OverviewRefreshSecs
 			data["rootfsRepositories"] = settings.RootfsRepositories
 			delete(data, "defaultNatUpstreamIfname")
@@ -1933,6 +1992,64 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleUILanguageSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "method not allowed"})
+		return
+	}
+	if strings.TrimSpace(s.configPath) == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "configuration path is not configured"})
+		return
+	}
+
+	var req uiLanguageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid json body"})
+		return
+	}
+	s.systemSettingsMu.Lock()
+	defer s.systemSettingsMu.Unlock()
+	uiLanguage, err := config.NormalizeUILanguage(req.UILanguage)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+		return
+	}
+	s.rootfsCacheMu.RLock()
+	repositories := append([]config.RootfsRepository(nil), s.rootfsRepos...)
+	repositoriesConfigured := s.rootfsReposConfigured
+	s.rootfsCacheMu.RUnlock()
+	if repositoriesConfigured {
+		repositories = config.EnsureDefaultRootfsRepositoriesForUILanguage(repositories, uiLanguage)
+	} else {
+		// The source was inherited from the old/default configuration rather
+		// than selected by the user, so replace only that managed source with
+		// the default for the language just chosen.
+		repositories = config.ApplyUILanguageRootfsDefaults(repositories, uiLanguage)
+	}
+	if err := s.persistWebConfig(func(data map[string]any) {
+		data["uiLanguage"] = uiLanguage
+		data["rootfsRepositories"] = repositories
+	}); err != nil {
+		writeJSON(w, http.StatusBadGateway, apiError{Error: err.Error()})
+		return
+	}
+
+	s.uiLanguage = uiLanguage
+	s.uiLanguageConfigured = true
+	s.rootfsCacheMu.Lock()
+	s.rootfsRepos = repositories
+	s.rootfsReposConfigured = true
+	s.rootfsCacheMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                   true,
+		"saved":                true,
+		"configWritten":        true,
+		"uiLanguage":           s.uiLanguage,
+		"uiLanguageConfigured": s.uiLanguageConfigured,
+		"rootfsRepositories":   repositories,
+	})
+}
+
 func (s *Server) applySystemSettings(settings normalizedSystemSettings, deferListenSettings bool) {
 	previousNestedAndroidNATCompat, previousScope := s.nestedAndroidNATCompatState()
 	nextWorkspace := strings.TrimSpace(settings.Workspace)
@@ -1940,6 +2057,7 @@ func (s *Server) applySystemSettings(settings normalizedSystemSettings, deferLis
 	compatChanged := previousNestedAndroidNATCompat != settings.NestedAndroidNATCompat || previousScope.workspace != nextWorkspace
 	previousBatteryMonitoring := s.batteryMonitoringEnabledSetting()
 	batterySamplerRestart := previousBatteryMonitoring != settings.BatteryMonitoringEnabled || s.workspace != nextWorkspace
+	retentionChanged := s.batteryStatsRetentionDaysSetting() != settings.BatteryStatsRetentionDays
 	// Publish the new state before cancelling. A reconcile that was
 	// queued before this update re-reads state after taking its execution lock,
 	// so it cannot recreate rules for the old configuration afterwards. Policy
@@ -1967,6 +2085,8 @@ func (s *Server) applySystemSettings(settings normalizedSystemSettings, deferLis
 		s.port = settings.Port
 	}
 	s.authToken = settings.AuthToken
+	s.uiLanguage = settings.UILanguage
+	s.uiLanguageConfigured = true
 	s.droidspacesPath = settings.DroidspacesPath
 	s.corePath = settings.CorePath
 	s.imageRoot = settings.ImageRoot
@@ -1975,6 +2095,7 @@ func (s *Server) applySystemSettings(settings normalizedSystemSettings, deferLis
 	s.socketdEnabled = settings.SocketdEnabled
 	s.rootfsSkipTLSVerify = settings.RootfsSkipTLSVerify
 	s.rootfsRepos = settings.RootfsRepositories
+	s.rootfsReposConfigured = true
 	s.rootfsClient = rootfs.NewClient(settings.RootfsSkipTLSVerify)
 	s.defaultNATCIDR = settings.DefaultNATCIDR
 	s.defaultNATThirdOctet = settings.DefaultNATThirdOctet
@@ -1984,11 +2105,18 @@ func (s *Server) applySystemSettings(settings normalizedSystemSettings, deferLis
 	s.setBatteryFeatureSettings(settings.OverviewPowerEnabled, settings.BatteryMonitoringEnabled)
 	atomic.StoreInt64(&s.batteryStatsSampleSecs, int64(settings.BatteryStatsSampleSecs))
 	atomic.StoreInt64(&s.batteryStatsWriteMins, int64(settings.BatteryStatsWriteMins))
+	atomic.StoreInt64(&s.batteryStatsRetentionDays, int64(settings.BatteryStatsRetentionDays))
 	s.overviewRefreshSecs = settings.OverviewRefreshSecs
 	configuredBatterySeriesCells = settings.BatterySeriesCells
 	if workspaceChanged {
 		s.batteryStatsMu.Lock()
 		s.batteryStats = batteryStatsState{}
+		s.batteryStatsMu.Unlock()
+	} else if retentionChanged {
+		s.batteryStatsMu.Lock()
+		storageRoot := s.batteryStatsStorageRoot()
+		s.flushBatteryStatsLocked(storageRoot, time.Now())
+		s.loadBatteryStatsLocked(storageRoot, time.Now())
 		s.batteryStatsMu.Unlock()
 	}
 	if settings.BatteryMonitoringEnabled && batterySamplerRestart {
@@ -2035,6 +2163,14 @@ func (s *Server) normalizeSystemSettings(req systemSettingsRequest) (normalizedS
 			return normalizedSystemSettings{}, fmt.Errorf("generate authToken: %w", err)
 		}
 		authToken = token
+	}
+	uiLanguage := strings.TrimSpace(req.UILanguage)
+	if uiLanguage == "" {
+		uiLanguage = s.uiLanguage
+	}
+	uiLanguage, err := config.NormalizeUILanguage(uiLanguage)
+	if err != nil {
+		return normalizedSystemSettings{}, err
 	}
 	paths := map[string]string{
 		"droidspacesPath":   strings.TrimSpace(req.DroidspacesPath),
@@ -2111,6 +2247,13 @@ func (s *Server) normalizeSystemSettings(req systemSettingsRequest) (normalizedS
 	if batteryStatsWriteMins < batteryStatsMinWriteMinutes || batteryStatsWriteMins > batteryStatsMaxWriteMinutes {
 		return normalizedSystemSettings{}, fmt.Errorf("batteryStatsWriteMinutes must be between %d and %d", batteryStatsMinWriteMinutes, batteryStatsMaxWriteMinutes)
 	}
+	batteryStatsRetentionDays := req.BatteryStatsRetentionDays
+	if batteryStatsRetentionDays <= 0 {
+		batteryStatsRetentionDays = s.batteryStatsRetentionDaysSetting()
+	}
+	if batteryStatsRetentionDays < batteryStatsMinRetentionDays || batteryStatsRetentionDays > batteryStatsMaxRetentionDays {
+		return normalizedSystemSettings{}, fmt.Errorf("batteryStatsRetentionDays must be between %d and %d", batteryStatsMinRetentionDays, batteryStatsMaxRetentionDays)
+	}
 	overviewRefreshSecs := req.OverviewRefreshSecs
 	if overviewRefreshSecs <= 0 {
 		overviewRefreshSecs = s.overviewRefreshSecs
@@ -2147,29 +2290,31 @@ func (s *Server) normalizeSystemSettings(req systemSettingsRequest) (normalizedS
 		return normalizedSystemSettings{}, err
 	}
 	return normalizedSystemSettings{
-		Mode:                     mode,
-		Host:                     host,
-		Port:                     req.Port,
-		AuthToken:                authToken,
-		DroidspacesPath:          paths["droidspacesPath"],
-		CorePath:                 paths["corePath"],
-		ImageRoot:                paths["imageRoot"],
-		TemplateImageRoot:        paths["templateImageRoot"],
-		Workspace:                paths["workspace"],
-		SocketdEnabled:           socketdEnabled,
-		RootfsSkipTLSVerify:      rootfsSkipTLSVerify,
-		DefaultNATCIDR:           cidr,
-		DefaultNATThirdOctet:     natThirdOctet,
-		NestedAndroidNATCompat:   nestedAndroidNATCompat,
-		BatteryDirectPower:       batteryDirectPower,
-		BatterySeriesCells:       batterySeriesCells,
-		OverviewPowerEnabled:     overviewPowerEnabled,
-		BatteryMonitoringEnabled: batteryMonitoringEnabled,
-		BatteryDetailEnabled:     batteryDetailEnabled,
-		BatteryStatsSampleSecs:   batteryStatsSampleSecs,
-		BatteryStatsWriteMins:    batteryStatsWriteMins,
-		OverviewRefreshSecs:      overviewRefreshSecs,
-		RootfsRepositories:       repos,
+		Mode:                      mode,
+		Host:                      host,
+		Port:                      req.Port,
+		AuthToken:                 authToken,
+		UILanguage:                uiLanguage,
+		DroidspacesPath:           paths["droidspacesPath"],
+		CorePath:                  paths["corePath"],
+		ImageRoot:                 paths["imageRoot"],
+		TemplateImageRoot:         paths["templateImageRoot"],
+		Workspace:                 paths["workspace"],
+		SocketdEnabled:            socketdEnabled,
+		RootfsSkipTLSVerify:       rootfsSkipTLSVerify,
+		DefaultNATCIDR:            cidr,
+		DefaultNATThirdOctet:      natThirdOctet,
+		NestedAndroidNATCompat:    nestedAndroidNATCompat,
+		BatteryDirectPower:        batteryDirectPower,
+		BatterySeriesCells:        batterySeriesCells,
+		OverviewPowerEnabled:      overviewPowerEnabled,
+		BatteryMonitoringEnabled:  batteryMonitoringEnabled,
+		BatteryDetailEnabled:      batteryDetailEnabled,
+		BatteryStatsSampleSecs:    batteryStatsSampleSecs,
+		BatteryStatsWriteMins:     batteryStatsWriteMins,
+		BatteryStatsRetentionDays: batteryStatsRetentionDays,
+		OverviewRefreshSecs:       overviewRefreshSecs,
+		RootfsRepositories:        repos,
 	}, nil
 }
 
@@ -2183,6 +2328,8 @@ func (s *Server) systemSettingsResponse(saved bool, restartRequired bool) map[st
 		"host":                        s.host,
 		"port":                        s.port,
 		"authToken":                   s.authToken,
+		"uiLanguage":                  s.uiLanguage,
+		"uiLanguageConfigured":        s.uiLanguageConfigured,
 		"authEnabled":                 s.authToken != "",
 		"droidspacesPath":             s.droidspacesPath,
 		"corePath":                    s.corePath,
@@ -2202,6 +2349,7 @@ func (s *Server) systemSettingsResponse(saved bool, restartRequired bool) map[st
 		"batteryDetailEnabled":        s.batteryDetailEnabled,
 		"batteryStatsSampleSeconds":   s.batteryStatsSampleSeconds(),
 		"batteryStatsWriteMinutes":    s.batteryStatsWriteMinutes(),
+		"batteryStatsRetentionDays":   s.batteryStatsRetentionDaysSetting(),
 		"overviewRefreshSeconds":      s.overviewRefreshSecs,
 		"natGatewayIP":                "172.28.0.1",
 		// Droidspaces v6.5 detects the uplink itself. Retain these fields for
@@ -2237,6 +2385,7 @@ func (s *Server) handleRootfsRepositories(w http.ResponseWriter, r *http.Request
 		}
 		s.rootfsCacheMu.Lock()
 		s.rootfsRepos = repos
+		s.rootfsReposConfigured = true
 		s.rootfsCacheMu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "repositories": repos})
 	default:
@@ -3710,8 +3859,8 @@ func (s *Server) handleBatteryPower(w http.ResponseWriter, r *http.Request) {
 	hours := 24
 	if raw := strings.TrimSpace(r.URL.Query().Get("hours")); raw != "" {
 		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 168 {
-			writeJSON(w, http.StatusBadRequest, apiError{Error: "hours must be between 1 and 168"})
+		if err != nil || value < 1 || value > batteryStatsMaxPowerRangeHours {
+			writeJSON(w, http.StatusBadRequest, apiError{Error: fmt.Sprintf("hours must be between 1 and %d", batteryStatsMaxPowerRangeHours)})
 			return
 		}
 		hours = value
@@ -6125,6 +6274,10 @@ func normalizeBatteryReport(report batteryReport, directPowerSupported bool) bat
 	report.SignedPowerW = 0
 	report.HasSignedCurrent = false
 	report.HasSignedPower = false
+	report.ChargingPowerW = 0
+	report.BoardPowerEstimateW = 0
+	report.HasChargingPower = false
+	report.HasBoardPowerEstimate = false
 
 	if currentMA, ok := batteryReportSignedCurrentMA(report); ok {
 		report.SignedCurrentMA = currentMA
@@ -6180,6 +6333,7 @@ func normalizeBatteryReport(report batteryReport, directPowerSupported bool) bat
 		report.PowerMode = "idle"
 		report.PowerModeSource = "status"
 	}
+	populateBatteryPowerSplit(&report)
 	report.Summary = batteryReportSummary(report)
 	return report
 }
@@ -6256,6 +6410,32 @@ func batteryReportHasExternalPower(report batteryReport) bool {
 	return report.HasInputCurrent && math.Abs(report.InputCurrentMA) >= batteryStatsMinCurrentMA
 }
 
+// populateBatteryPowerSplit derives the device-side consumption only when
+// both a measured external input reading and a positive battery charge reading
+// are available. The remainder includes power-conversion losses, so callers
+// must present it as an estimate rather than a measured motherboard rail.
+func populateBatteryPowerSplit(report *batteryReport) {
+	if report.PowerMode != "charging" || !report.HasSignedPower || report.SignedPowerW <= batteryStatsMinPowerW {
+		return
+	}
+
+	report.ChargingPowerW = report.SignedPowerW
+	report.HasChargingPower = true
+	if !report.HasInputPower || !strings.EqualFold(report.InputPowerKind, "measured") || report.InputPowerW <= batteryStatsMinPowerW {
+		return
+	}
+
+	boardPowerW := report.InputPowerW - report.ChargingPowerW
+	if boardPowerW < -batteryBoardPowerToleranceW {
+		return
+	}
+	if boardPowerW < 0 {
+		boardPowerW = 0
+	}
+	report.BoardPowerEstimateW = boardPowerW
+	report.HasBoardPowerEstimate = true
+}
+
 func batteryReportSignedPowerW(report batteryReport) (float64, bool) {
 	return batterySampleSignedPowerW(batteryStatsSample{
 		Status:     report.Status,
@@ -6309,7 +6489,7 @@ func (s *Server) updateBatteryStats(report batteryReport, now time.Time) battery
 			MinSampleIntervalSeconds: int(interval / time.Second),
 			SamplerIntervalSeconds:   int(interval / time.Second),
 			WriteIntervalSeconds:     int(writeInterval / time.Second),
-			DatabaseMode:             "jsonl-checkpoint",
+			DatabaseMode:             "daily-jsonl",
 			Message:                  "设备未提供电池数据",
 		}
 	}
@@ -6319,7 +6499,7 @@ func (s *Server) updateBatteryStats(report batteryReport, now time.Time) battery
 			MinSampleIntervalSeconds: int(interval / time.Second),
 			SamplerIntervalSeconds:   int(interval / time.Second),
 			WriteIntervalSeconds:     int(writeInterval / time.Second),
-			DatabaseMode:             "jsonl-checkpoint",
+			DatabaseMode:             "daily-jsonl",
 			Message:                  "需要更多有效电池数据",
 		}
 	}
@@ -6333,9 +6513,9 @@ func (s *Server) updateBatteryStats(report batteryReport, now time.Time) battery
 		return s.disabledBatteryReport().Stats
 	}
 
-	path := s.batteryStatsPath()
-	if s.batteryStats.path != path || !s.batteryStats.loaded {
-		s.loadBatteryStatsLocked(path)
+	storageRoot := s.batteryStatsStorageRoot()
+	if s.batteryStats.path != storageRoot || !s.batteryStats.loaded || s.batteryStatsStorageChangedLocked(storageRoot) {
+		s.loadBatteryStatsLocked(storageRoot, now)
 	}
 
 	if s.shouldRecordBatteryStatsSampleLocked(sample, now) {
@@ -6351,24 +6531,17 @@ func (s *Server) updateBatteryStats(report batteryReport, now time.Time) battery
 			s.batteryStats.pendingSince = sample.Time
 		}
 		s.batteryStats.pendingSamples = append(s.batteryStats.pendingSamples, sample)
-		s.flushBatteryStatsIfDueLocked(path, now)
+		s.flushBatteryStatsIfDueLocked(storageRoot, now)
 	}
 
 	return s.batteryStats.report(sample, interval, writeInterval)
 }
 
-func (s *Server) batteryStatsPath() string {
+func (s *Server) batteryStatsStorageRoot() string {
 	if s.workspace == "" {
 		return ""
 	}
-	return filepath.Join(s.workspace, batteryStatsFileName)
-}
-
-func (s *Server) batteryStatsCheckpointPath() string {
-	if s.workspace == "" {
-		return ""
-	}
-	return filepath.Join(s.workspace, batteryStatsDBFileName)
+	return filepath.Join(s.workspace, batteryStatsDirectoryName)
 }
 
 func (s *Server) batteryStatsSampleSeconds() int {
@@ -6407,42 +6580,71 @@ func (s *Server) batteryStatsWriteInterval() time.Duration {
 	return time.Duration(s.batteryStatsWriteMinutes()) * time.Minute
 }
 
+func (s *Server) batteryStatsRetentionDaysSetting() int {
+	days := int(atomic.LoadInt64(&s.batteryStatsRetentionDays))
+	if days <= 0 {
+		days = batteryStatsDefaultRetentionDays
+	}
+	if days < batteryStatsMinRetentionDays {
+		return batteryStatsMinRetentionDays
+	}
+	if days > batteryStatsMaxRetentionDays {
+		return batteryStatsMaxRetentionDays
+	}
+	return days
+}
+
 func (s *Server) flushBatteryStatsIfDueLocked(path string, now time.Time) {
 	if path == "" || len(s.batteryStats.pendingSamples) == 0 {
 		return
 	}
 	lastFlush := s.batteryStats.lastFlushTime
 	if lastFlush <= 0 {
-		lastFlush = s.batteryStats.checkpointSampleTime
-	}
-	if lastFlush <= 0 {
 		lastFlush = s.batteryStats.pendingSince
 	}
 	if lastFlush > 0 && now.Sub(time.Unix(lastFlush, 0)) < s.batteryStatsWriteInterval() {
 		return
 	}
-	s.flushBatteryStatsLocked(path)
+	s.flushBatteryStatsLocked(path, now)
 }
 
-func (s *Server) flushBatteryStatsLocked(path string) {
+func (s *Server) flushBatteryStatsLocked(path string, now time.Time) {
 	if path == "" || len(s.batteryStats.pendingSamples) == 0 {
 		return
 	}
-	if err := appendBatteryStatsSamples(path, s.batteryStats.pendingSamples); err != nil {
-		s.batteryStats.storageError = err.Error()
-		return
+	groups := make(map[string][]batteryStatsSample)
+	for _, sample := range s.batteryStats.pendingSamples {
+		groups[batteryStatsDailyFilePath(path, sample.Time)] = append(groups[batteryStatsDailyFilePath(path, sample.Time)], sample)
 	}
-	if err := writeBatteryStatsCheckpoint(s.batteryStats.checkpointPath, s.batteryStats); err != nil {
+	paths := make([]string, 0, len(groups))
+	for dailyPath := range groups {
+		paths = append(paths, dailyPath)
+	}
+	sort.Strings(paths)
+
+	remaining := make([]batteryStatsSample, 0)
+	for index, dailyPath := range paths {
+		if err := appendBatteryStatsSamples(dailyPath, groups[dailyPath]); err != nil {
+			s.batteryStats.storageError = err.Error()
+			for _, unflushedPath := range paths[index:] {
+				remaining = append(remaining, groups[unflushedPath]...)
+			}
+			s.batteryStats.pendingSamples = remaining
+			if len(remaining) > 0 {
+				s.batteryStats.pendingSince = remaining[0].Time
+			}
+			return
+		}
+	}
+	if err := s.pruneBatteryStatsFiles(path, now); err != nil {
 		s.batteryStats.storageError = err.Error()
 		return
 	}
 	s.batteryStats.storageError = ""
 	s.batteryStats.pendingSamples = nil
 	s.batteryStats.pendingSince = 0
-	s.batteryStats.loadedFromCheckpoint = true
-	s.batteryStats.checkpointSampleTime = s.batteryStats.lastSample.Time
-	s.batteryStats.checkpointSampleCount = s.batteryStats.sampleCount
 	s.batteryStats.lastFlushTime = s.batteryStats.lastSample.Time
+	s.batteryStats.storageSignature = batteryStatsStorageSignature(path)
 }
 
 func (s *Server) batteryPowerRangeReport(hours int, now time.Time) (batteryPowerRangeReport, error) {
@@ -6451,7 +6653,7 @@ func (s *Server) batteryPowerRangeReport(hours int, now time.Time) (batteryPower
 	}
 	from := now.Add(-time.Duration(hours) * time.Hour).Unix()
 	to := now.Unix()
-	samples, err := s.batteryPowerSamplesSince(from)
+	samples, err := s.batteryPowerSamplesSince(from, now)
 	if err != nil {
 		return batteryPowerRangeReport{}, err
 	}
@@ -6555,38 +6757,21 @@ func downsampleBatteryPowerRangeSamples(samples []batteryPowerRangeSample, limit
 	return out
 }
 
-func (s *Server) batteryPowerSamplesSince(from int64) ([]batteryStatsSample, error) {
-	samples := make([]batteryStatsSample, 0, 256)
-	path := s.batteryStatsPath()
-	if path != "" {
-		file, err := os.Open(path)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if err == nil {
-			scanner := bufio.NewScanner(file)
-			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-			for scanner.Scan() {
-				var sample batteryStatsSample
-				if err := json.Unmarshal(scanner.Bytes(), &sample); err == nil && batteryStatsSampleUseful(sample) && sample.Time >= from {
-					samples = append(samples, sample)
-				}
-			}
-			closeErr := file.Close()
-			if err := scanner.Err(); err != nil {
-				return nil, err
-			}
-			if closeErr != nil {
-				return nil, closeErr
-			}
-		}
-	}
+func (s *Server) batteryPowerSamplesSince(from int64, now time.Time) ([]batteryStatsSample, error) {
+	storageRoot := s.batteryStatsStorageRoot()
 	s.batteryStatsMu.Lock()
-	if s.batteryStats.path != path || !s.batteryStats.loaded {
-		s.loadBatteryStatsLocked(path)
+	if s.batteryStats.path != storageRoot || !s.batteryStats.loaded || s.batteryStatsStorageChangedLocked(storageRoot) {
+		s.loadBatteryStatsLocked(storageRoot, now)
+	} else if err := s.pruneBatteryStatsFiles(storageRoot, now); err != nil {
+		s.batteryStatsMu.Unlock()
+		return nil, err
 	}
 	pending := append([]batteryStatsSample(nil), s.batteryStats.pendingSamples...)
 	s.batteryStatsMu.Unlock()
+	samples, err := readBatteryStatsDailySamples(storageRoot, from, batteryStatsRetentionCutoff(now, s.batteryStatsRetentionDaysSetting()))
+	if err != nil {
+		return nil, err
+	}
 	seen := map[int64]bool{}
 	for _, sample := range samples {
 		seen[sample.Time] = true
@@ -6629,59 +6814,379 @@ func finalizeBatteryPowerBins(bins []batteryPowerRangeBin, total int) {
 	}
 }
 
-func (s *Server) loadBatteryStatsLocked(path string) {
-	state := batteryStatsState{path: path, checkpointPath: s.batteryStatsCheckpointPath(), loaded: true}
-	if path == "" {
-		s.batteryStats = state
-		return
-	}
-	if checkpoint, err := readBatteryStatsCheckpoint(state.checkpointPath); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			state.storageError = err.Error()
-		}
-	} else {
-		state.applyCheckpoint(checkpoint)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			state.storageError = err.Error()
-		} else if state.loadedFromCheckpoint {
-			state.storageError = ""
-		}
-		s.batteryStats = state
-		return
-	}
-	defer file.Close()
+type batteryStatsDailyFile struct {
+	path string
+	day  time.Time
+}
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024), 1024*1024)
-	prev := state.lastSample
-	hasPrev := state.hasLastSample
+// loadBatteryStatsLocked rebuilds summaries strictly from the retained daily
+// data files. The former checkpoint is deliberately not read: it was a cache
+// rather than source data, so it could resurrect samples after a user deleted
+// the old JSONL file.
+func (s *Server) loadBatteryStatsLocked(storageRoot string, now time.Time) {
+	state := batteryStatsState{path: storageRoot, loaded: true}
+	if storageRoot == "" {
+		s.batteryStats = state
+		return
+	}
+	if err := s.migrateLegacyBatteryStatsLocked(storageRoot, now); err != nil {
+		state.storageError = err.Error()
+	}
+	if err := s.pruneBatteryStatsFiles(storageRoot, now); err != nil && state.storageError == "" {
+		state.storageError = err.Error()
+	}
+	files, err := listBatteryStatsDailyFiles(storageRoot)
+	if err != nil {
+		if state.storageError == "" {
+			state.storageError = err.Error()
+		}
+		s.batteryStats = state
+		return
+	}
+	cutoff := batteryStatsRetentionCutoff(now, s.batteryStatsRetentionDaysSetting())
+	for _, dailyFile := range files {
+		if dailyFile.day.Before(cutoff) {
+			continue
+		}
+		samples, err := readBatteryStatsSamples(dailyFile.path)
+		if err != nil {
+			if state.storageError == "" {
+				state.storageError = err.Error()
+			}
+			continue
+		}
+		for _, sample := range samples {
+			if !batteryStatsSampleUseful(sample) || batteryStatsDayKey(sample.Time) != dailyFile.day.Format("2006-01-02") {
+				continue
+			}
+			state.recordBatteryStatsSample(sample)
+		}
+	}
+	if state.hasLastSample && !state.hasTrackedRemaining {
+		state.seedTrackedRemaining(state.lastSample)
+	}
+	state.storageSignature = batteryStatsStorageSignature(storageRoot)
+	s.batteryStats = state
+}
+
+func (s *Server) batteryStatsStorageChangedLocked(storageRoot string) bool {
+	return s.batteryStats.storageSignature != batteryStatsStorageSignature(storageRoot)
+}
+
+func (state *batteryStatsState) recordBatteryStatsSample(sample batteryStatsSample) {
+	if state.hasLastSample {
+		// Daily files are append-only. Ignore duplicate or clock-reversed rows so
+		// a partial/manual file edit cannot inflate cumulative totals.
+		if sample.Time <= state.lastSample.Time {
+			return
+		}
+		state.addBatteryStatsTransition(state.lastSample, sample)
+	} else {
+		state.seedTrackedRemaining(sample)
+	}
+	state.lastSample = sample
+	state.hasLastSample = true
+	state.sampleCount++
+	state.lastFlushTime = sample.Time
+}
+
+func (s *Server) migrateLegacyBatteryStatsLocked(storageRoot string, now time.Time) error {
+	marker := s.batteryStatsMigrationMarkerPath()
+	if marker == "" {
+		return nil
+	}
+	if _, err := os.Stat(marker); err == nil {
+		return s.retireLegacyBatteryStatsFiles()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	entries, err := os.ReadDir(storageRoot)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if len(entries) > 0 {
+		if err := writeBatteryStatsMigrationMarker(marker); err != nil {
+			return err
+		}
+		return s.retireLegacyBatteryStatsFiles()
+	}
+
+	legacyPath := filepath.Join(s.workspace, batteryStatsFileName)
+	legacy, err := os.Open(legacyPath)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := writeBatteryStatsMigrationMarker(marker); err != nil {
+			return err
+		}
+		return s.retireLegacyBatteryStatsFiles()
+	}
+	if err != nil {
+		return err
+	}
+	defer legacy.Close()
+
+	if err := os.MkdirAll(s.workspace, 0755); err != nil {
+		return err
+	}
+	stagingRoot, err := os.MkdirTemp(s.workspace, ".battery-stats-migration-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stagingRoot)
+
+	files := map[string]*os.File{}
+	encoders := map[string]*json.Encoder{}
+	closeWriters := func() error {
+		var firstErr error
+		for _, file := range files {
+			if err := file.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	cutoff := batteryStatsRetentionCutoff(now, s.batteryStatsRetentionDaysSetting())
+	scanner := bufio.NewScanner(legacy)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		var sample batteryStatsSample
 		if err := json.Unmarshal(scanner.Bytes(), &sample); err != nil || !batteryStatsSampleUseful(sample) {
 			continue
 		}
-		if state.loadedFromCheckpoint && sample.Time <= state.checkpointSampleTime {
+		if batteryStatsDayForUnix(sample.Time).Before(cutoff) {
 			continue
 		}
-		if hasPrev {
-			state.addBatteryStatsTransition(prev, sample)
+		name := batteryStatsDailyFileName(sample.Time)
+		if encoders[name] == nil {
+			file, err := os.OpenFile(filepath.Join(stagingRoot, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+			if err != nil {
+				_ = closeWriters()
+				return err
+			}
+			files[name] = file
+			encoders[name] = json.NewEncoder(file)
 		}
-		state.lastSample = sample
-		state.hasLastSample = true
-		state.sampleCount++
-		prev = sample
-		hasPrev = true
+		if err := encoders[name].Encode(sample); err != nil {
+			_ = closeWriters()
+			return err
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		state.storageError = err.Error()
+		_ = closeWriters()
+		return err
 	}
-	if state.hasLastSample && !state.hasTrackedRemaining {
-		state.seedTrackedRemaining(state.lastSample)
+	if err := closeWriters(); err != nil {
+		return err
 	}
-	s.batteryStats = state
+
+	if _, err := os.Stat(storageRoot); err == nil {
+		// The directory was observed empty before staging began. Removing that
+		// empty placeholder lets the completed daily store appear atomically.
+		if err := os.Remove(storageRoot); err != nil {
+			// Another process may have created a daily file while migration was
+			// staging. In that case do not overwrite it; leave migration for the
+			// next startup/collection pass.
+			if errors.Is(err, syscall.ENOTEMPTY) {
+				return nil
+			}
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(stagingRoot, storageRoot); err != nil {
+		return err
+	}
+	if err := writeBatteryStatsMigrationMarker(marker); err != nil {
+		return err
+	}
+	return s.retireLegacyBatteryStatsFiles()
+}
+
+func (s *Server) retireLegacyBatteryStatsFiles() error {
+	if s.workspace == "" {
+		return nil
+	}
+	for _, name := range []string{batteryStatsFileName, batteryStatsDBFileName} {
+		if err := os.Remove(filepath.Join(s.workspace, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) batteryStatsMigrationMarkerPath() string {
+	if s.workspace == "" {
+		return ""
+	}
+	return filepath.Join(s.workspace, "battery_stats_daily_v1.migrated")
+}
+
+func writeBatteryStatsMigrationMarker(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte("daily battery stats migration complete\n"), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Server) pruneBatteryStatsFiles(storageRoot string, now time.Time) error {
+	files, err := listBatteryStatsDailyFiles(storageRoot)
+	if err != nil {
+		return err
+	}
+	cutoff := batteryStatsRetentionCutoff(now, s.batteryStatsRetentionDaysSetting())
+	for _, dailyFile := range files {
+		if dailyFile.day.Before(cutoff) {
+			if err := os.Remove(dailyFile.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func listBatteryStatsDailyFiles(storageRoot string) ([]batteryStatsDailyFile, error) {
+	if storageRoot == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(storageRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	files := make([]batteryStatsDailyFile, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		day, ok := parseBatteryStatsDailyFileName(entry.Name())
+		if !ok {
+			continue
+		}
+		files = append(files, batteryStatsDailyFile{path: filepath.Join(storageRoot, entry.Name()), day: day})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].day.Before(files[j].day) })
+	return files, nil
+}
+
+// batteryStatsStorageSignature uses directory metadata and daily-file names,
+// without reading every retained file on each sample. That detects the normal
+// manual cleanup case even on filesystems with coarse directory timestamps: a
+// deleted source file resets in-memory totals instead of leaving stale values.
+func batteryStatsStorageSignature(storageRoot string) string {
+	info, err := os.Stat(storageRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		return "error:" + err.Error()
+	}
+	if !info.IsDir() {
+		return "error:not-a-directory"
+	}
+	entries, err := os.ReadDir(storageRoot)
+	if err != nil {
+		return "error:" + err.Error()
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := parseBatteryStatsDailyFileName(entry.Name()); ok {
+			names = append(names, entry.Name())
+		}
+	}
+	return fmt.Sprintf("%d:%d:%s", info.ModTime().UnixNano(), info.Size(), strings.Join(names, ","))
+}
+
+func readBatteryStatsDailySamples(storageRoot string, from int64, cutoff time.Time) ([]batteryStatsSample, error) {
+	files, err := listBatteryStatsDailyFiles(storageRoot)
+	if err != nil {
+		return nil, err
+	}
+	samples := make([]batteryStatsSample, 0, 256)
+	for _, dailyFile := range files {
+		if dailyFile.day.Before(cutoff) {
+			continue
+		}
+		rows, err := readBatteryStatsSamples(dailyFile.path)
+		if err != nil {
+			return nil, err
+		}
+		dayKey := dailyFile.day.Format("2006-01-02")
+		for _, sample := range rows {
+			if batteryStatsSampleUseful(sample) && sample.Time >= from && batteryStatsDayKey(sample.Time) == dayKey {
+				samples = append(samples, sample)
+			}
+		}
+	}
+	return samples, nil
+}
+
+func readBatteryStatsSamples(path string) ([]batteryStatsSample, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	rows := make([]batteryStatsSample, 0, 256)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var sample batteryStatsSample
+		if err := json.Unmarshal(scanner.Bytes(), &sample); err == nil {
+			rows = append(rows, sample)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func batteryStatsDailyFilePath(storageRoot string, timestamp int64) string {
+	return filepath.Join(storageRoot, batteryStatsDailyFileName(timestamp))
+}
+
+func batteryStatsDailyFileName(timestamp int64) string {
+	return batteryStatsDayKey(timestamp) + ".jsonl"
+}
+
+func batteryStatsDayKey(timestamp int64) string {
+	return batteryStatsDayForUnix(timestamp).Format("2006-01-02")
+}
+
+func batteryStatsDayForUnix(timestamp int64) time.Time {
+	local := time.Unix(timestamp, 0).In(time.Local)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+}
+
+func batteryStatsRetentionCutoff(now time.Time, retentionDays int) time.Time {
+	if retentionDays <= 0 {
+		retentionDays = batteryStatsDefaultRetentionDays
+	}
+	local := now.In(time.Local)
+	startOfToday := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+	return startOfToday.AddDate(0, 0, -(retentionDays - 1))
+}
+
+func parseBatteryStatsDailyFileName(name string) (time.Time, bool) {
+	if len(name) != len("2006-01-02.jsonl") || !strings.HasSuffix(name, ".jsonl") {
+		return time.Time{}, false
+	}
+	day, err := time.ParseInLocation("2006-01-02", strings.TrimSuffix(name, ".jsonl"), time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return day, true
 }
 
 func (s *Server) shouldRecordBatteryStatsSampleLocked(sample batteryStatsSample, now time.Time) bool {
@@ -6724,86 +7229,6 @@ func appendBatteryStatsSamples(path string, samples []batteryStatsSample) error 
 		}
 	}
 	return nil
-}
-
-func readBatteryStatsCheckpoint(path string) (batteryStatsCheckpoint, error) {
-	if path == "" {
-		return batteryStatsCheckpoint{}, os.ErrNotExist
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return batteryStatsCheckpoint{}, err
-	}
-	var checkpoint batteryStatsCheckpoint
-	if err := json.Unmarshal(data, &checkpoint); err != nil {
-		return batteryStatsCheckpoint{}, err
-	}
-	if checkpoint.Version != batteryStatsCheckpointVersion {
-		return batteryStatsCheckpoint{}, fmt.Errorf("unsupported battery stats database version %d", checkpoint.Version)
-	}
-	if checkpoint.HasLastSample && !batteryStatsSampleUseful(checkpoint.LastSample) {
-		return batteryStatsCheckpoint{}, fmt.Errorf("battery stats database has invalid last sample")
-	}
-	return checkpoint, nil
-}
-
-func writeBatteryStatsCheckpoint(path string, state batteryStatsState) error {
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	checkpoint := batteryStatsCheckpoint{
-		Version:              batteryStatsCheckpointVersion,
-		UpdatedAt:            time.Now().Unix(),
-		SampleCount:          state.sampleCount,
-		LastSample:           state.lastSample,
-		HasLastSample:        state.hasLastSample,
-		ChargeWh:             state.chargeWh,
-		DischargeWh:          state.dischargeWh,
-		InputWh:              state.inputWh,
-		ChargeMah:            state.chargeMah,
-		DischargeMah:         state.dischargeMah,
-		UsableWhWeightedSum:  state.usableWhWeightedSum,
-		UsableWhWeight:       state.usableWhWeight,
-		TrackedRemainingWh:   state.trackedRemainingWh,
-		HasTrackedRemaining:  state.hasTrackedRemaining,
-		TrackedSource:        state.trackedSource,
-		CheckpointSampleTime: state.lastSample.Time,
-	}
-	data, err := json.MarshalIndent(checkpoint, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func (state *batteryStatsState) applyCheckpoint(checkpoint batteryStatsCheckpoint) {
-	state.sampleCount = checkpoint.SampleCount
-	state.lastSample = checkpoint.LastSample
-	state.hasLastSample = checkpoint.HasLastSample
-	state.chargeWh = checkpoint.ChargeWh
-	state.dischargeWh = checkpoint.DischargeWh
-	state.inputWh = checkpoint.InputWh
-	state.chargeMah = checkpoint.ChargeMah
-	state.dischargeMah = checkpoint.DischargeMah
-	state.usableWhWeightedSum = checkpoint.UsableWhWeightedSum
-	state.usableWhWeight = checkpoint.UsableWhWeight
-	state.trackedRemainingWh = checkpoint.TrackedRemainingWh
-	state.hasTrackedRemaining = checkpoint.HasTrackedRemaining
-	state.trackedSource = checkpoint.TrackedSource
-	state.loadedFromCheckpoint = true
-	state.checkpointSampleTime = checkpoint.CheckpointSampleTime
-	if state.checkpointSampleTime <= 0 && checkpoint.HasLastSample {
-		state.checkpointSampleTime = checkpoint.LastSample.Time
-	}
-	state.checkpointSampleCount = checkpoint.SampleCount
 }
 
 func batteryStatsSampleFromReport(report batteryReport, now time.Time) batteryStatsSample {
@@ -6897,7 +7322,7 @@ func (state batteryStatsState) report(sample batteryStatsSample, interval time.D
 		InputWh:                  state.inputWh,
 		ChargeMah:                state.chargeMah,
 		DischargeMah:             state.dischargeMah,
-		DatabaseMode:             "jsonl-checkpoint",
+		DatabaseMode:             "daily-jsonl",
 		StorageError:             state.storageError,
 	}
 	if state.hasLastSample {
@@ -6905,8 +7330,6 @@ func (state batteryStatsState) report(sample batteryStatsSample, interval time.D
 	}
 	if state.lastFlushTime > 0 {
 		report.LastWriteTime = state.lastFlushTime
-	} else if state.checkpointSampleTime > 0 {
-		report.LastWriteTime = state.checkpointSampleTime
 	}
 
 	fullWh, hasFullWh := batterySampleFullWh(sample)

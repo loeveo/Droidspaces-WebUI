@@ -41,7 +41,9 @@ done
 [ -s "$out_dir/webui.linux.json" ] || fail "missing Linux template: $out_dir/webui.linux.json"
 [ -s "$out_dir/webui.android.json" ] || fail "missing Android template: $out_dir/webui.android.json"
 [ -f README.md ] || fail "README.md is required"
+[ -f README_EN.md ] || fail "README_EN.md is required"
 [ -x scripts/install-linux.sh ] || fail "scripts/install-linux.sh is required and must be executable"
+[ -x scripts/start-android-webui.sh ] || fail "scripts/start-android-webui.sh is required and must be executable"
 
 mkdir -p "$release_root"
 rm -rf "$staging_dir"
@@ -55,7 +57,9 @@ done
 install -m 0644 "$out_dir/webui.linux.json" "$staging_dir/config/webui.linux.json"
 install -m 0644 "$out_dir/webui.android.json" "$staging_dir/config/webui.android.json"
 install -m 0644 README.md "$staging_dir/README.md"
+install -m 0644 README_EN.md "$staging_dir/README_EN.md"
 install -m 0755 scripts/install-linux.sh "$staging_dir/install-linux.sh"
+install -m 0755 scripts/start-android-webui.sh "$staging_dir/android-start-webui.sh"
 printf '{\n  "droidspacesRepository": "ravindu644/Droidspaces-OSS",\n  "droidspacesReleaseTag": "%s"\n}\n' \
   "$supported_core_version" > "$staging_dir/release-manifest.json"
 
@@ -79,8 +83,10 @@ printf '%s\n' \
   "- bin/：Linux 与 Android 常见 CPU 架构的静态 WebUI 二进制。" \
   "- config/webui.linux.json：/var/lib/Droidspaces 的 Linux 标准配置。" \
   "- config/webui.android.json：/data/local/Droidspaces 的 Android 标准配置。" \
+  "- README.md / README_EN.md：中文与英文说明文档。" \
   "- release-manifest.json：本发行包锁定的官方 Droidspaces Release 标签。" \
   "- install-linux.sh：Linux 一键安装脚本。" \
+  "- android-start-webui.sh：可放入 Magisk service.d 的 Android WebUI 启动脚本。" \
   "- SHA256SUMS：发行包内每个文件的 SHA-256 校验和。" \
   "" \
   "## 架构选择" \
@@ -92,7 +98,7 @@ printf '%s\n' \
   "- Android x86/x86_64：使用对应的 android-386/android-amd64。" \
   "" \
   "Android 产物刻意使用 Linux ELF，因为 Droidspaces 运行于 Android 的 Linux 用户空间。" \
-  "手动安装时，将对应二进制复制到平台的 bin 目录，将对应配置复制为工作区的 webui.json，再以 --config <工作区>/webui.json 启动。" \
+  "手动安装时，将对应二进制复制到平台的 bin 目录，将对应配置复制为工作区的 webui.json；Android 可使用 android-start-webui.sh 启动或放入 Magisk service.d。" \
   > "$staging_dir/RELEASE.md"
 
 (

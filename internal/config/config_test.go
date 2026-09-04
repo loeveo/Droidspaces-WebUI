@@ -97,6 +97,38 @@ func TestDefaultUsesCurrentPlatformWorkspaceLayout(t *testing.T) {
 	if got, want := DefaultPath(), filepath.Join(wantWorkspace, "webui.json"); got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
+	if cfg.UILanguage != UILanguageSimplifiedChinese {
+		t.Fatalf("UILanguage = %q, want %q", cfg.UILanguage, UILanguageSimplifiedChinese)
+	}
+}
+
+func TestNormalizeUILanguage(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: UILanguageSimplifiedChinese},
+		{input: "zh-CN", want: UILanguageSimplifiedChinese},
+		{input: "ZH-hans", want: UILanguageSimplifiedChinese},
+		{input: "en", want: UILanguageEnglish},
+		{input: "en-US", want: UILanguageEnglish},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			got, err := NormalizeUILanguage(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("NormalizeUILanguage(%q) = %q, want %q", test.input, got, test.want)
+			}
+		})
+	}
+
+	if _, err := NormalizeUILanguage("fr"); err == nil {
+		t.Fatal("unsupported UI language was accepted")
+	}
 }
 
 func TestPlatformExampleTemplatesUseCanonicalPaths(t *testing.T) {
@@ -155,7 +187,13 @@ func TestPlatformExampleTemplatesUseCanonicalPaths(t *testing.T) {
 			if cfg.RootfsSkipTLSVerify != test.skipTLS {
 				t.Fatalf("RootfsSkipTLSVerify = %t, want %t", cfg.RootfsSkipTLSVerify, test.skipTLS)
 			}
-			if len(cfg.RootfsRepositories) != 2 || cfg.RootfsRepositories[1].Name != LinuxContainersRepositoryName {
+			if cfg.UILanguage != UILanguageSimplifiedChinese {
+				t.Fatalf("UILanguage = %q, want %q", cfg.UILanguage, UILanguageSimplifiedChinese)
+			}
+			if !cfg.UILanguageConfigured {
+				t.Fatal("template uiLanguage must be marked configured")
+			}
+			if len(cfg.RootfsRepositories) != 2 || cfg.RootfsRepositories[1] != (RootfsRepository{Name: LinuxContainersRepositoryName, URL: LinuxContainersNJURepositoryURL}) {
 				t.Fatalf("rootfs repositories = %#v", cfg.RootfsRepositories)
 			}
 		})
@@ -192,12 +230,45 @@ func TestDefaultRootfsRepositoriesIncludeLinuxContainers(t *testing.T) {
 	if !Default().OverviewPowerEnabled || !Default().BatteryMonitoringEnabled {
 		t.Fatal("battery features must default to enabled")
 	}
+	if Default().BatteryStatsRetentionDays != 7 {
+		t.Fatalf("battery stats retention default = %d, want 7", Default().BatteryStatsRetentionDays)
+	}
 	repositories := DefaultRootfsRepositories()
 	if len(repositories) != 2 {
 		t.Fatalf("repository count = %d, want 2", len(repositories))
 	}
-	if repositories[1].Name != LinuxContainersRepositoryName || repositories[1].URL != LinuxContainersRepositoryURL {
+	if repositories[1].Name != LinuxContainersRepositoryName || repositories[1].URL != LinuxContainersNJURepositoryURL {
 		t.Fatalf("Linux Containers repository = %#v", repositories[1])
+	}
+}
+
+func TestDefaultRootfsRepositoriesFollowUILanguage(t *testing.T) {
+	tests := []struct {
+		language string
+		wantURL  string
+	}{
+		{language: UILanguageSimplifiedChinese, wantURL: LinuxContainersNJURepositoryURL},
+		{language: UILanguageEnglish, wantURL: LinuxContainersRepositoryURL},
+	}
+
+	for _, test := range tests {
+		t.Run(test.language, func(t *testing.T) {
+			repositories := DefaultRootfsRepositoriesForUILanguage(test.language)
+			if len(repositories) != 2 || repositories[1] != (RootfsRepository{Name: LinuxContainersRepositoryName, URL: test.wantURL}) {
+				t.Fatalf("repositories = %#v", repositories)
+			}
+		})
+	}
+}
+
+func TestApplyUILanguageRootfsDefaultsKeepsCustomRepositories(t *testing.T) {
+	custom := RootfsRepository{Name: "Custom", URL: "https://example.test/rootfs.json"}
+	repositories := ApplyUILanguageRootfsDefaults([]RootfsRepository{
+		custom,
+		{Name: LinuxContainersRepositoryName, URL: LinuxContainersNJURepositoryURL},
+	}, UILanguageEnglish)
+	if len(repositories) != 2 || repositories[0] != custom || repositories[1].URL != LinuxContainersRepositoryURL {
+		t.Fatalf("repositories = %#v", repositories)
 	}
 }
 
@@ -212,6 +283,76 @@ func TestLoadKeepsBatteryFeatureDefaultsForExistingConfig(t *testing.T) {
 	}
 	if !cfg.OverviewPowerEnabled || !cfg.BatteryMonitoringEnabled {
 		t.Fatalf("existing config must retain enabled battery defaults: %#v", cfg)
+	}
+	if cfg.UILanguage != UILanguageSimplifiedChinese {
+		t.Fatalf("existing config must retain the default UI language: %#v", cfg)
+	}
+	if cfg.UILanguageConfigured {
+		t.Fatalf("existing config without uiLanguage must require first-visit setup: %#v", cfg)
+	}
+	if len(cfg.RootfsRepositories) != 2 || cfg.RootfsRepositories[1].URL != LinuxContainersNJURepositoryURL {
+		t.Fatalf("Chinese default lxc-image source = %#v", cfg.RootfsRepositories)
+	}
+}
+
+func TestLoadUILanguageFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "webui.json")
+	if err := os.WriteFile(path, []byte(`{"uiLanguage":"en-US"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := Load(path, CLIOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UILanguage != UILanguageEnglish {
+		t.Fatalf("UILanguage = %q, want %q", cfg.UILanguage, UILanguageEnglish)
+	}
+	if !cfg.UILanguageConfigured {
+		t.Fatal("explicit uiLanguage must be marked configured")
+	}
+	if cfg.RootfsRepositoriesConfigured {
+		t.Fatal("missing rootfsRepositories must remain distinguishable from an explicit source selection")
+	}
+	if got := cfg.RootfsRepositories[1].URL; got != LinuxContainersRepositoryURL {
+		t.Fatalf("English default lxc-image URL = %q, want %q", got, LinuxContainersRepositoryURL)
+	}
+}
+
+func TestLoadPreservesExplicitLXCImageSourceAcrossLanguageDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "webui.json")
+	contents := `{"uiLanguage":"en","rootfsRepositories":[{"name":"lxc-image","url":"https://mirror.nju.edu.cn/lxc-images/"}]}`
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := Load(path, CLIOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RootfsRepositoriesConfigured {
+		t.Fatal("explicit rootfsRepositories must be marked configured")
+	}
+	if len(cfg.RootfsRepositories) != 1 || cfg.RootfsRepositories[0].URL != LinuxContainersNJURepositoryURL {
+		t.Fatalf("explicit lxc-image source was changed: %#v", cfg.RootfsRepositories)
+	}
+}
+
+func TestLoadUsesUILanguageDefaultForEmptyRootfsRepositories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "webui.json")
+	if err := os.WriteFile(path, []byte(`{"uiLanguage":"en","rootfsRepositories":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := Load(path, CLIOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RootfsRepositoriesConfigured {
+		t.Fatal("an empty repository list must not be treated as a manual lxc-image selection")
+	}
+	if len(cfg.RootfsRepositories) != 2 || cfg.RootfsRepositories[1].URL != LinuxContainersRepositoryURL {
+		t.Fatalf("empty repository list did not receive the English default: %#v", cfg.RootfsRepositories)
 	}
 }
 
@@ -235,8 +376,12 @@ func TestEnsureDefaultRootfsRepositoriesKeepsExistingAndAddsLinuxContainers(t *t
 	if len(repositories) != 2 || repositories[0] != existing[0] {
 		t.Fatalf("repositories = %#v", repositories)
 	}
-	if repositories[1].URL != LinuxContainersRepositoryURL {
+	if repositories[1].URL != LinuxContainersNJURepositoryURL {
 		t.Fatalf("Linux Containers repository missing: %#v", repositories)
+	}
+	english := EnsureDefaultRootfsRepositoriesForUILanguage(existing, UILanguageEnglish)
+	if english[1].URL != LinuxContainersRepositoryURL {
+		t.Fatalf("English Linux Containers default = %#v", english)
 	}
 
 	repositories = EnsureDefaultRootfsRepositories(repositories)
@@ -372,8 +517,10 @@ func TestSocketdEnabledCanBeOverridden(t *testing.T) {
 	t.Setenv("DS_WEBUI_BATTERY_DETAIL_ENABLED", "false")
 	t.Setenv("DS_WEBUI_BATTERY_STATS_SAMPLE_SECONDS", "5")
 	t.Setenv("DS_WEBUI_BATTERY_STATS_WRITE_MINUTES", "6")
+	t.Setenv("DS_WEBUI_BATTERY_STATS_RETENTION_DAYS", "12")
 	t.Setenv("DS_WEBUI_OVERVIEW_REFRESH_SECONDS", "7")
 	t.Setenv("DS_WEBUI_NESTED_ANDROID_NAT_COMPAT", "true")
+	t.Setenv("DS_WEBUI_UI_LANGUAGE", "en-US")
 	applyEnv(&cfg)
 	if cfg.SocketdEnabled == nil || *cfg.SocketdEnabled {
 		t.Fatalf("env socketd override not applied: %#v", cfg.SocketdEnabled)
@@ -399,11 +546,23 @@ func TestSocketdEnabledCanBeOverridden(t *testing.T) {
 	if cfg.BatteryStatsWriteMins != 6 {
 		t.Fatalf("battery stats write env override not applied: %d", cfg.BatteryStatsWriteMins)
 	}
+	if cfg.BatteryStatsRetentionDays != 12 {
+		t.Fatalf("battery stats retention env override not applied: %d", cfg.BatteryStatsRetentionDays)
+	}
 	if cfg.OverviewRefreshSecs != 7 {
 		t.Fatalf("overview refresh env override not applied: %d", cfg.OverviewRefreshSecs)
 	}
 	if !cfg.NestedAndroidNATCompat {
 		t.Fatal("nested Android NAT compatibility env override not applied")
+	}
+	if err := normalize(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UILanguage != UILanguageEnglish {
+		t.Fatalf("UI language env override not applied: %q", cfg.UILanguage)
+	}
+	if !cfg.UILanguageConfigured {
+		t.Fatal("UI language env override must be marked configured")
 	}
 
 	enabled := true

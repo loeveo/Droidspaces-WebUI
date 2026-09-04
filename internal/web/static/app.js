@@ -1,7 +1,8 @@
-const PRIVILEGED_ACK = "我永远不会报告任何bug";
 const DEFAULT_OVERVIEW_REFRESH_SECONDS = 3;
 const DEFAULT_BATTERY_STATS_SAMPLE_SECONDS = 3;
 const DEFAULT_BATTERY_STATS_WRITE_MINUTES = 5;
+const DEFAULT_BATTERY_STATS_RETENTION_DAYS = 7;
+const BATTERY_POWER_SPLIT_TOLERANCE_W = 0.15;
 const BACKGROUND_REFRESH_MS = 30000;
 const WEBUI_LOG_REFRESH_MS = 3000;
 const NAT_IP_PREFIX = "172.28";
@@ -14,7 +15,6 @@ const LINUX_CONTAINERS_CN_MIRROR_URL = "https://mirror.nju.edu.cn/lxc-images/";
 const LINUX_CONTAINERS_CN_MIRROR_NAME = "lxc-image CN（南京大学镜像）";
 const LEGACY_LINUX_CONTAINERS_NAME = "Linux Containers";
 const LEGACY_LINUX_CONTAINERS_CN_MIRROR_NAME = "Linux Containers CN（南京大学镜像）";
-const ROOTFS_REPOSITORY_URL_PLACEHOLDER = "rootfs.json 或 https://images.linuxcontainers.org/";
 const ROOTFS_ASSET_MEMORY_CACHE_MS = 24 * 60 * 60 * 1000;
 const CLOUD_INIT_MAX_DOCUMENT_BYTES = 64 * 1024;
 const CLOUD_INIT_RANDOM_PASSWORD_LENGTH = 8;
@@ -53,6 +53,18 @@ const state = {
   rootfsRepositoryEditorOpen: false,
   rootfsErrors: [],
   systemSettings: {},
+  systemSettingsLoaded: false,
+  confirmedUILanguage: "",
+  pendingInitialUILanguage: "",
+  initialUILanguageSavePromise: null,
+  uiLanguageSaveVersion: 0,
+  uiLanguageSaveCompletedVersion: 0,
+  uiLanguageSavePending: false,
+  settingsWriteVersion: 0,
+  settingsWriteCompletedVersion: 0,
+  settingsWritePending: false,
+  settingsSaveQueue: Promise.resolve(),
+  systemSettingsSaving: false,
   coreUpdate: null,
   networkSettings: { defaultNatCIDR: "172.28.0.0/16", defaultNatThirdOctet: DEFAULT_NAT_THIRD_OCTET, natGatewayIP: "172.28.0.1" },
   containerUsers: {},
@@ -79,6 +91,147 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+const t = (key, values) => window.DS_I18N?.t(key, values) || key;
+const uiText = (zh, en) => (window.DS_I18N?.getLocale?.() === "en" ? en : zh);
+const uiLocale = () => (window.DS_I18N?.getLocale?.() === "en" ? "en-US" : "zh-CN");
+
+function translateContainerOptionGrid(prefix) {
+  const options = [
+    ["AndroidStorage", "Android 存储", "Android Storage", "挂载 Android 存储。", "Mount Android storage."],
+    ["HwAccess", "硬件访问", "Hardware Access", "完整的硬件访问权限。", "Full hardware access permissions."],
+    ["Gpu", "GPU 访问", "GPU Access", "将 GPU 节点镜像到隔离的 /dev（非完整硬件直通）。", "Mirror GPU nodes into the isolated /dev (not full hardware passthrough)."],
+    ["TermuxX11", "配置 Termux:X11", "Configure Termux:X11", "为 Termux:X11 启用 X11 套接字挂载。", "Enable the X11 socket mount for Termux:X11."],
+    ["Virgl", "配置 VirGL 3D 加速功能", "Configure VirGL 3D Acceleration", "通过 VirGL 启用 3D 硬件加速。", "Enable 3D hardware acceleration through VirGL."],
+    ["Pulse", "配置 PulseAudio", "Configure PulseAudio", "通过 PulseAudio 启用音频支持。", "Enable audio support through PulseAudio."],
+    ["SelinuxPermissive", "SELinux 宽容模式", "SELinux Permissive Mode", "将 SELinux 设置为宽容模式。", "Set SELinux to permissive mode."],
+    ["AllowUserns", "允许用户命名空间", "Allow User Namespaces", "为 Docker、Podman 等嵌套容器运行时解除用户命名空间限制。", "Allow user namespaces for nested runtimes such as Docker and Podman."],
+    ["Volatile", "易失模式", "Volatile Mode", "仅内存模式（停止后更改将丢失）。", "Memory-only mode; changes are lost after stopping."],
+    ["RunAtBoot", "开机启动", "Run at Boot", "加入 Droidspaces 的容器启动队列。", "Add this container to the Droidspaces startup queue."],
+    ["ForceCgroupV1", "强制 Cgroup V1", "Force Cgroup V1", "强制使用旧版 Cgroup V1 层级结构。", "Force the legacy Cgroup V1 hierarchy."],
+    ["DisableIpv6", "禁用 IPv6", "Disable IPv6", "在此容器中禁用 IPv6。这可能会导致宿主机的 VPN 应用异常。", "Disable IPv6 in this container. This can affect VPN applications on the host."],
+    ["BlockNestedNS", "手动死锁防护", "Manual Deadlock Protection", "通过阻止嵌套命名空间创建，防止旧版内核上的 VFS 死锁；会屏蔽 Docker、Podman、LXC 及 Systemd 沙盒功能。", "Prevent VFS deadlocks on older kernels by blocking nested namespaces; this disables Docker, Podman, LXC, and systemd sandboxing."],
+  ];
+  options.forEach(([suffix, zhName, enName, zhDescription, enDescription]) => {
+    const label = $(`#${prefix}${suffix}`)?.closest("label");
+    if (!label) return;
+    const name = label.querySelector(".option-name");
+    const description = label.querySelector(".option-desc");
+    if (name) name.textContent = uiText(zhName, enName);
+    if (description) description.textContent = uiText(zhDescription, enDescription);
+  });
+
+  const privileged = $(`#${prefix}PrivilegedMode`);
+  if (!privileged) return;
+  const legend = privileged.querySelector("legend");
+  const summary = privileged.querySelector(".privileged-summary");
+  if (legend) legend.textContent = uiText("特权模式", "Privileged Mode");
+  if (summary) summary.textContent = uiText("为嵌套虚拟化或高级硬件访问配置细粒度的安全限制放宽。", "Configure fine-grained security relaxations for nested virtualization or advanced hardware access.");
+  const descriptions = {
+    full: ["同时启用所有特权标志。", "Enable all privileged flags at once."],
+    nomask: ["禁用隔离掩码以允许对 /proc 和 /sys 的写访问。注意：除非同时启用了“硬件访问”，否则 /sys 将保持只读状态。", "Disable isolation masks to allow writes to /proc and /sys. Note: /sys remains read-only unless Hardware Access is enabled."],
+    nocaps: ["保留所有 Linux Capabilities（完整 root 权限）。", "Retain all Linux capabilities (full root privileges)."],
+    noseccomp: ["禁用 Seccomp 系统调用过滤。启用非特权用户命名空间等高级内核功能，是嵌套沙箱的必要条件，并允许加载树外内核模块。", "Disable Seccomp syscall filtering. This enables advanced kernel features such as unprivileged user namespaces, supports nested sandboxes, and allows out-of-tree kernel modules."],
+    shared: ["启用至宿主机的 MS_SHARED 挂载传播。", "Enable MS_SHARED mount propagation to the host."],
+    "unfiltered-dev": ["绕过设备过滤。宿主机的所有 /dev 节点都将可见。", "Bypass device filtering. All host /dev nodes become visible."],
+  };
+  privileged.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    const description = input.closest("label")?.querySelector(".option-desc");
+    const pair = descriptions[input.value];
+    if (description && pair) description.textContent = uiText(pair[0], pair[1]);
+  });
+}
+
+function applyLocalizedDynamicLabels() {
+  translateContainerOptionGrid("create");
+  translateContainerOptionGrid("config");
+  const fieldLabels = [
+    ["#settingsMode", "监听模式", "Listen Mode"],
+    ["#settingsHost", "监听地址", "Listen Address"],
+    ["#settingsPort", "监听端口", "Listen Port"],
+    ["#settingsOverviewRefreshSeconds", "概览刷新间隔（秒）", "Overview Refresh Interval (seconds)"],
+    ["#settingsOverviewPowerEnabled", "首页显示当前功耗", "Show Current Power on Overview"],
+    ["#settingsBatteryMonitoringEnabled", "启用电池监控", "Enable Battery Monitoring"],
+    ["#settingsBatteryStatsSampleSeconds", "电池统计采样间隔（秒）", "Battery Statistics Sample Interval (seconds)"],
+    ["#settingsBatteryStatsWriteMinutes", "电池统计写入间隔（分钟）", "Battery Statistics Write Interval (minutes)"],
+    ["#settingsBatteryStatsRetentionDays", "电池统计保留天数", "Battery Statistics Retention (days)"],
+    ["#settingsBatterySeriesCells", "电池串联结构", "Battery Series Cells"],
+    ["#settingsAuthToken", "授权 Token", "Authorization Token"],
+    ["#settingsSocketdEnabled", "启用 socketd 后端", "Enable socketd Backend"],
+    ["#settingsRootfsSkipTLSVerify", "镜像下载跳过 TLS 校验", "Skip TLS Verification for Image Downloads"],
+    ["#settingsBatteryDirectPower", "设备支持直供电/旁路供电", "Device Supports Direct/Bypass Power"],
+    ["#settingsDroidspacesPath", "Droidspaces 二进制", "Droidspaces Binary"],
+    ["#settingsCorePath", "核心目录", "Core Directory"],
+    ["#settingsTemplateImageRoot", "模板镜像目录", "Template Image Directory"],
+    ["#settingsWorkspace", "工作区", "Workspace"],
+    ["#settingsConfigPath", "配置文件", "Configuration File"],
+    ["#settingsDefaultNatThirdOctet", "NAT 第 3 位", "NAT Third Octet"],
+    ["#settingsDefaultNatCIDR", "NAT 默认前缀", "Default NAT Prefix"],
+    ["#settingsNatGatewayIP", "NAT 网关", "NAT Gateway"],
+    ["#settingsNatUpstreamMode", "上游出口（自动）", "Upstream (Automatic)"],
+    ["#settingsNestedAndroidNatCompat", "嵌套 Android NAT 路由兼容（仅在 Linux 容器中运行 WebUI 时启用；不修改防火墙）", "Nested Android NAT Routing Compatibility (only when WebUI runs in a Linux container; does not modify the firewall)"],
+    ["#settingsDaemonMode", "Daemon mode", "Daemon Mode"],
+    ["#settingsSymlinkEnabled", "system/bin 软链接", "system/bin Symlink"],
+  ];
+  fieldLabels.forEach(([selector, zh, en]) => {
+    const field = $(selector);
+    const text = field?.closest("label")?.querySelector("span");
+    if (text) text.textContent = uiText(zh, en);
+  });
+  const sectionLabels = [
+    ["#settingsMode", ".settings-card", "WebUI 运行", "WebUI Runtime"],
+    ["#settingsDroidspacesPath", ".settings-card", "路径配置", "Path Configuration"],
+    ["#settingsDefaultNatThirdOctet", ".settings-card", "NAT 默认配置", "NAT Default Configuration"],
+    ["#settingsDaemonMode", ".settings-card", "Android 集成", "Android Integration"],
+  ];
+  sectionLabels.forEach(([selector, cardSelector, zh, en]) => {
+    const heading = $(selector)?.closest(cardSelector)?.querySelector("h3");
+    if (heading) heading.textContent = uiText(zh, en);
+  });
+  const batteryOptions = [
+    ["#batteryPowerHours option[value=\"1\"]", "最近 1 小时", "Last 1 Hour"],
+    ["#batteryPowerHours option[value=\"6\"]", "最近 6 小时", "Last 6 Hours"],
+    ["#batteryPowerHours option[value=\"24\"]", "最近 24 小时", "Last 24 Hours"],
+    ["#batteryPowerHours option[value=\"72\"]", "最近 72 小时", "Last 72 Hours"],
+    ["#batteryPowerHours option[value=\"168\"]", "最近 7 天", "Last 7 Days"],
+    ["#batteryPowerHours option[value=\"336\"]", "最近 14 天", "Last 14 Days"],
+    ["#batteryPowerHours option[value=\"720\"]", "最近 30 天", "Last 30 Days"],
+    ["#batteryPowerHours option[value=\"2160\"]", "最近 90 天", "Last 90 Days"],
+    ["#batteryPowerHours option[value=\"4320\"]", "最近 180 天", "Last 180 Days"],
+    ["#batteryPowerHours option[value=\"8760\"]", "最近 365 天", "Last 365 Days"],
+  ];
+  batteryOptions.forEach(([selector, zh, en]) => {
+    const option = $(selector);
+    if (option) option.textContent = uiText(zh, en);
+  });
+  const batteryHeadings = [
+    ["#batteryPowerBins", "电池放电功率区间（仅放电）", "Battery Discharge Power Ranges (Discharging Only)"],
+    ["#inputPowerBins", "外部输入功率区间", "External Input Power Ranges"],
+    ["#batteryPowerChart", "功率曲线", "Power Chart"],
+  ];
+  batteryHeadings.forEach(([selector, zh, en]) => {
+    const heading = $(selector)?.closest(".settings-card")?.querySelector("h3");
+    if (heading) heading.textContent = uiText(zh, en);
+  });
+  const seriesOptions = [
+    ["0", "自动识别", "Automatic"],
+    ["1", "1S 单节/单块", "1S Single Cell/Pack"],
+    ["2", "2S 双串", "2S Dual Series"],
+    ["3", "3S 三串", "3S Triple Series"],
+    ["4", "4S 四串", "4S Four Series"],
+    ["5", "5S 五串", "5S Five Series"],
+    ["6", "6S 六串", "6S Six Series"],
+  ];
+  seriesOptions.forEach(([value, zh, en]) => {
+    const option = $(`#settingsBatterySeriesCells option[value="${value}"]`);
+    if (option) option.textContent = uiText(zh, en);
+  });
+  const integrationStatus = $("#settingsIntegrationStatus");
+  if (integrationStatus) integrationStatus.textContent = uiText("等待状态", "Awaiting status");
+  $("#coreUpdateCheckBtn")?.setAttribute("title", uiText("检查核心更新", "Check for Core Updates"));
+  $("#coreUpdateCheckBtn")?.setAttribute("aria-label", uiText("检查核心更新", "Check for Core Updates"));
+  const settingsRepoAddButton = $("#settingsRepoAddBtn");
+  if (settingsRepoAddButton) settingsRepoAddButton.textContent = t("rootfs.addRepository");
+}
 
 const SERVICE_FILTERS = [
   ["running", "运行中"],
@@ -100,13 +253,30 @@ const SERVICE_EMPTY_TEXT = {
   all: "未找到服务",
 };
 
+let inMemoryAuthToken = "";
+let authTokenLoaded = false;
+
 function getAuthToken() {
-  return localStorage.getItem("DS_WEBUI_AUTH_TOKEN") || "";
+  if (!authTokenLoaded) {
+    authTokenLoaded = true;
+    try {
+      inMemoryAuthToken = localStorage.getItem("DS_WEBUI_AUTH_TOKEN") || "";
+    } catch (_) {
+      // Browser privacy settings can deny storage without denying API access.
+    }
+  }
+  return inMemoryAuthToken;
 }
 
 function setAuthToken(token) {
-  if (token) localStorage.setItem("DS_WEBUI_AUTH_TOKEN", token);
-  else localStorage.removeItem("DS_WEBUI_AUTH_TOKEN");
+  inMemoryAuthToken = token || "";
+  authTokenLoaded = true;
+  try {
+    if (token) localStorage.setItem("DS_WEBUI_AUTH_TOKEN", token);
+    else localStorage.removeItem("DS_WEBUI_AUTH_TOKEN");
+  } catch (_) {
+    // Keep the token for this page session when persistent storage is disabled.
+  }
 }
 
 function authHeaders() {
@@ -126,7 +296,7 @@ async function api(path, options = {}) {
     if (response.status === 401 && window.DS_AUTH_REQUIRED) {
       state.authenticated = false;
       setAuthToken("");
-      showLogin("授权失败，请重新输入 token");
+      showLogin(uiText("授权失败，请重新输入 token", "Authorization failed. Enter the token again."));
     }
     throw new Error(data.error || `HTTP ${response.status}`);
   }
@@ -139,11 +309,12 @@ async function loginWithToken(token) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     setAuthToken("");
-    throw new Error(data.error || "登录失败");
+    throw new Error(data.error || uiText("登录失败", "Login failed"));
   }
   state.authenticated = true;
   hideLogin();
   await loadSystemSettings(false).catch(() => {});
+  await savePendingInitialUILanguage().catch((err) => toast(err.message));
   await refreshAll();
   restartOverviewRefreshTimer();
 }
@@ -202,12 +373,12 @@ function toast(message, duration = 3600) {
 }
 
 function fmtTime(unix) {
-  if (!unix) return "未知";
-  return new Date(unix * 1000).toLocaleString();
+  if (!unix) return uiText("未知", "Unknown");
+  return new Date(unix * 1000).toLocaleString(uiLocale());
 }
 
 function fmtBytes(value) {
-  if (!value) return "无限制";
+  if (!value) return uiText("无限制", "Unlimited");
   const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let n = Number(value);
   let i = 0;
@@ -219,7 +390,7 @@ function fmtBytes(value) {
 }
 
 function fmtBytesOptional(value) {
-  if (value === undefined || value === null || value === "") return "未知";
+  if (value === undefined || value === null || value === "") return uiText("未知", "Unknown");
   if (Number(value) === 0) return "0 B";
   return fmtBytes(value);
 }
@@ -254,7 +425,7 @@ function cpuLimitPayload(value) {
 }
 
 function fmtPercent(value) {
-  if (value === undefined || value === null || value === "") return "待上报";
+  if (value === undefined || value === null || value === "") return uiText("待上报", "Awaiting data");
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
   return `${n > 1 && n <= 100 ? n.toFixed(1) : (n * 100).toFixed(1)}%`;
@@ -280,7 +451,7 @@ function usagePercentValue(value) {
 
 function usagePercentText(value) {
   const percent = usagePercentValue(value);
-  return percent === null ? "待上报" : `${fmtCompactNumber(percent, 1)}%`;
+  return percent === null ? uiText("待上报", "Awaiting data") : `${fmtCompactNumber(percent, 1)}%`;
 }
 
 function setUsageMeter(id, percent, label) {
@@ -295,7 +466,7 @@ function setUsageMeter(id, percent, label) {
     meter.setAttribute("aria-valuetext", `${label} ${fmtCompactNumber(displayed, 1)}%`);
   } else {
     meter.removeAttribute("aria-valuenow");
-    meter.setAttribute("aria-valuetext", `${label}待上报`);
+    meter.setAttribute("aria-valuetext", uiText(`${label}待上报`, `${label} awaiting data`));
   }
 }
 
@@ -322,11 +493,11 @@ function fmtRuntimeHours(value) {
   const n = metricNumber(value);
   if (n === null || n < 0) return "";
   const minutes = Math.round(n * 60);
-  if (minutes <= 0) return "<1分钟";
+  if (minutes <= 0) return uiText("<1分钟", "<1 min");
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  if (hours <= 0) return `${rest}分钟`;
-  return rest > 0 ? `${hours}小时${rest}分钟` : `${hours}小时`;
+  if (hours <= 0) return uiText(`${rest}分钟`, `${rest} min`);
+  return rest > 0 ? uiText(`${hours}小时${rest}分钟`, `${hours}h ${rest}m`) : uiText(`${hours}小时`, `${hours}h`);
 }
 
 function fmtBatteryHealth(value) {
@@ -380,7 +551,7 @@ function batteryDirection(battery, currentMA, hasCurrent, powerW, hasPower) {
 }
 
 function formatSignedBatteryMetric(value, unit, direction, available, precision, alreadySigned = false) {
-  if (!available || !Number.isFinite(value)) return "未上报";
+  if (!available || !Number.isFinite(value)) return uiText("未上报", "Awaiting data");
   if (Math.abs(value) < (unit === "W" ? 0.01 : 1)) return `0 ${unit}`;
   const signed = alreadySigned ? value : (direction === "discharging" ? -Math.abs(value) : (direction === "charging" ? Math.abs(value) : value));
   const sign = signed > 0 ? "+" : "";
@@ -388,9 +559,9 @@ function formatSignedBatteryMetric(value, unit, direction, available, precision,
 }
 
 function batteryRemainingSourceLabel(source) {
-  if (source === "database") return "库仑计";
-  if (source === "energy" || source === "charge") return "硬件";
-  if (source === "capacity") return "电量百分比";
+  if (source === "database") return uiText("库仑计", "Coulomb counter");
+  if (source === "energy" || source === "charge") return uiText("硬件", "Hardware");
+  if (source === "capacity") return uiText("电量百分比", "Battery percentage");
   return "";
 }
 
@@ -398,22 +569,22 @@ function batteryPresentation(battery) {
   if (battery?.enabled === false) {
     return {
       available: false,
-      homeMetricLabel: "当前功耗",
-      homeMain: "电池监控已关闭",
-      homeDetail: "可在系统设置中重新启用",
-      sourceLabel: "已关闭",
-      statusLabel: "电池监控已关闭",
+      homeMetricLabel: uiText("当前功耗", "Current Power"),
+      homeMain: uiText("电池监控已关闭", "Battery monitoring is disabled"),
+      homeDetail: uiText("可在系统设置中重新启用", "It can be re-enabled in System Settings"),
+      sourceLabel: uiText("已关闭", "Disabled"),
+      statusLabel: uiText("电池监控已关闭", "Battery monitoring is disabled"),
       statusClass: "unknown",
     };
   }
   if (!battery || !battery.available) {
     return {
       available: false,
-      homeMetricLabel: "当前功耗",
-      homeMain: "功耗未上报",
+      homeMetricLabel: uiText("当前功耗", "Current Power"),
+      homeMain: uiText("功耗未上报", "Power data unavailable"),
       homeDetail: "",
-      sourceLabel: "未上报",
-      statusLabel: "设备未提供电池数据",
+      sourceLabel: uiText("未上报", "Awaiting data"),
+      statusLabel: uiText("设备未提供电池数据", "The device did not provide battery data"),
       statusClass: "unknown",
     };
   }
@@ -442,16 +613,17 @@ function batteryPresentation(battery) {
     : null;
   const inputPowerW = hasInputPower && reportedInputPowerW !== null ? Math.abs(reportedInputPowerW) : computedInputPowerW;
   const inputPowerKind = String(battery.inputPowerKind || "measured").trim().toLowerCase();
+  const inputPowerIsMeasured = inputPowerKind === "measured";
   const inputPowerIsContract = inputPowerKind === "pd-contract";
   const inputPowerIsAverage = inputPowerKind === "average";
   const inputPowerLabel = inputPowerIsContract
-    ? "PD 协商功率"
-    : (inputPowerIsAverage ? "外部输入平均功率" : "外部输入功率");
+    ? uiText("PD 协商功率", "PD Negotiated Power")
+    : (inputPowerIsAverage ? uiText("总输入平均功率", "Average Total Input") : uiText("总输入功率", "Total Input Power"));
   const inputPowerDetail = inputPowerIsContract
-    ? "PD 协商档位，不代表设备实时功耗"
+    ? uiText("PD 协商档位，不代表设备实时功耗", "The PD contract is not the device real-time power draw")
     : (inputPowerIsAverage
-      ? "外部输入平均值，含充电与转换损耗"
-      : "外部输入测量值，含充电与转换损耗");
+      ? uiText("外部输入平均值，含充电与转换损耗", "Average external input, including charging and conversion losses")
+      : uiText("外部输入测量值，含充电与转换损耗", "Measured external input, including charging and conversion losses"));
   const externalPowerActive = battery.externalPowerActive === true
     || (inputPowerW !== null && inputPowerW > 0.01)
     || (hasInputCurrent && inputCurrentMA !== null && Math.abs(inputCurrentMA) > 1);
@@ -462,6 +634,24 @@ function batteryPresentation(battery) {
   const powerMode = hasPowerMode ? reportedPowerMode : fallbackPowerMode;
   const directPower = battery.directPowerActive === true || powerMode === "direct";
   const batterySupply = powerMode === "discharging";
+  const reportedChargingPowerW = metricNumber(battery.chargingPowerW);
+  const hasReportedChargingPower = batteryHasMetric(battery, "hasChargingPower", "chargingPowerW") && reportedChargingPowerW !== null && reportedChargingPowerW > 0.01;
+  const fallbackChargingPowerW = powerMode === "charging" && hasSignedPower && signedBatteryPowerW !== null && signedBatteryPowerW > 0.01
+    ? signedBatteryPowerW
+    : null;
+  const chargingPowerW = hasReportedChargingPower ? reportedChargingPowerW : fallbackChargingPowerW;
+  const hasChargingPower = chargingPowerW !== null;
+  const reportedBoardPowerW = metricNumber(battery.boardPowerEstimateW);
+  const hasReportedBoardPower = batteryHasMetric(battery, "hasBoardPowerEstimate", "boardPowerEstimateW") && reportedBoardPowerW !== null && reportedBoardPowerW >= 0;
+  const fallbackBoardPowerW = hasChargingPower && inputPowerW !== null && inputPowerIsMeasured
+    ? inputPowerW - chargingPowerW
+    : null;
+  const validFallbackBoardPowerW = fallbackBoardPowerW !== null && fallbackBoardPowerW >= -BATTERY_POWER_SPLIT_TOLERANCE_W
+    ? Math.max(0, fallbackBoardPowerW)
+    : null;
+  const boardPowerEstimateW = hasReportedBoardPower ? reportedBoardPowerW : validFallbackBoardPowerW;
+  const hasBoardPowerEstimate = boardPowerEstimateW !== null;
+  const hasPowerSplit = powerMode === "charging" && inputPowerW !== null && hasChargingPower && hasBoardPowerEstimate && inputPowerIsMeasured;
   const stats = battery.stats && typeof battery.stats === "object" ? battery.stats : {};
   const remainingWh = statMetric(stats, "estimatedRemainingWh", "hasEstimatedRemainingWh");
   const usableWh = statMetric(stats, "estimatedUsableWh", "hasEstimatedUsableWh");
@@ -470,12 +660,12 @@ function batteryPresentation(battery) {
   const chargeTotal = fmtEnergyWithMah(positiveEnergyMetric(stats, "chargeWh"), positiveStatMetric(stats, "chargeMah"));
   const dischargeTotal = fmtEnergyWithMah(positiveEnergyMetric(stats, "dischargeWh"), positiveStatMetric(stats, "dischargeMah"));
   const inputTotal = fmtWh(positiveEnergyMetric(stats, "inputWh"));
-  const capacityText = hasCapacity && capacity !== null ? `${fmtCompactNumber(capacity, 0)}%` : "未上报";
-  const remainingText = remainingWh !== null ? fmtWh(remainingWh) : "未估算";
+  const capacityText = hasCapacity && capacity !== null ? `${fmtCompactNumber(capacity, 0)}%` : uiText("未上报", "Awaiting data");
+  const remainingText = remainingWh !== null ? fmtWh(remainingWh) : uiText("未估算", "Not estimated");
   const remainingSource = batteryRemainingSourceLabel(stats.remainingSource);
-  const runtimeText = runtimeHours !== null ? fmtRuntimeHours(runtimeHours) : "暂无法估算";
+  const runtimeText = runtimeHours !== null ? fmtRuntimeHours(runtimeHours) : uiText("暂无法估算", "Not yet estimated");
   const batteryPowerText = directPower
-    ? "0 W（旁路）"
+    ? uiText("0 W（旁路）", "0 W (bypass)")
     : formatSignedBatteryMetric(
       hasSignedPower && signedBatteryPowerW !== null ? signedBatteryPowerW : (batteryPowerW || 0),
       "W",
@@ -485,7 +675,7 @@ function batteryPresentation(battery) {
       hasSignedPower,
     );
   const batteryCurrentText = directPower
-    ? "0 mA（旁路）"
+    ? uiText("0 mA（旁路）", "0 mA (bypass)")
     : formatSignedBatteryMetric(
       hasSignedCurrent && signedCurrentMA !== null ? signedCurrentMA : (currentMA || 0),
       "mA",
@@ -498,70 +688,83 @@ function batteryPresentation(battery) {
   if (inputPowerW !== null) inputParts.push(`${fmtCompactNumber(inputPowerW, 3)} W`);
   if (hasInputCurrent && inputCurrentMA !== null) inputParts.push(`${fmtCompactNumber(Math.abs(inputCurrentMA), 0)} mA`);
   if (hasInputVoltage && inputVoltageV !== null) inputParts.push(`${fmtCompactNumber(inputVoltageV, 3)} V`);
-  const inputText = inputParts.length ? inputParts.join(" / ") : "未上报";
-  const voltageText = hasVoltage && voltageV !== null ? `${fmtCompactNumber(voltageV, 3)} V` : "未上报";
+  const inputText = inputParts.length ? inputParts.join(" / ") : uiText("未上报", "Awaiting data");
+  const totalInputPowerText = inputPowerW !== null ? `${fmtCompactNumber(inputPowerW, 3)} W` : uiText("未上报", "Awaiting data");
+  const batteryChargingPowerText = hasChargingPower ? `${fmtCompactNumber(chargingPowerW, 3)} W` : uiText("未上报", "Awaiting data");
+  const boardPowerEstimateText = hasBoardPowerEstimate ? `${fmtCompactNumber(boardPowerEstimateW, 3)} W` : uiText("未上报", "Awaiting data");
+  const powerSplitDetail = hasPowerSplit
+    ? uiText(`总输入 ${totalInputPowerText} - 电池充电 ${batteryChargingPowerText}，包含转换损耗`, `Total input ${totalInputPowerText} - battery charging ${batteryChargingPowerText}; includes conversion losses`)
+    : "";
+  const voltageText = hasVoltage && voltageV !== null ? `${fmtCompactNumber(voltageV, 3)} V` : uiText("未上报", "Awaiting data");
   const temperature = metricNumber(battery.temperatureC);
-  const temperatureText = hasTemperature && temperature !== null ? `${fmtCompactNumber(temperature, 1)} C` : "未上报";
+  const temperatureText = hasTemperature && temperature !== null ? `${fmtCompactNumber(temperature, 1)} C` : uiText("未上报", "Awaiting data");
   const chargeNow = batteryHasMetric(battery, "hasCharge", "chargeMah") ? fmtMah(battery.chargeMah) : "";
   const energyNow = batteryHasMetric(battery, "hasEnergy", "energyWh") ? fmtWh(battery.energyWh) : "";
   const fullCharge = batteryHasMetric(battery, "hasFullCharge", "fullChargeMah") ? fmtMah(battery.fullChargeMah) : "";
   const fullEnergy = batteryHasMetric(battery, "hasFullEnergy", "fullEnergyWh") ? fmtWh(battery.fullEnergyWh) : "";
   const deviceHealth = batteryHasMetric(battery, "hasHealth", "healthPercent") ? fmtBatteryHealth(battery.healthPercent) : "";
 
-  let sourceLabel = "供电来源未确认";
-  let sourceDetail = "等待电池端或外部输入数据";
-  let statusLabel = "供电状态未知";
+  let sourceLabel = uiText("供电来源未确认", "Power source unconfirmed");
+  let sourceDetail = uiText("等待电池端或外部输入数据", "Waiting for battery or external input data");
+  let statusLabel = uiText("供电状态未知", "Power state unknown");
   let statusClass = "unknown";
   if (directPower) {
-    sourceLabel = "直供电";
-    sourceDetail = "外部输入直接供电，电池未参与供电";
-    statusLabel = "旁路供电中";
+    sourceLabel = uiText("直供电", "Direct Power");
+    sourceDetail = uiText("外部输入直接供电，电池未参与供电", "External input powers the device directly; the battery is not supplying power");
+    statusLabel = uiText("旁路供电中", "Bypass Power");
     statusClass = "direct";
   } else if (powerMode === "discharging") {
-    sourceLabel = "电池供电";
-    sourceDetail = "设备当前由电池供电";
-    statusLabel = "正在放电";
+    sourceLabel = uiText("电池供电", "Battery Power");
+    sourceDetail = uiText("设备当前由电池供电", "The device is currently powered by the battery");
+    statusLabel = uiText("正在放电", "Discharging");
     statusClass = "discharging";
   } else if (powerMode === "charging") {
-    sourceLabel = "外部供电";
-    sourceDetail = "外部输入正在为设备和电池供电";
-    statusLabel = "正在充电";
+    sourceLabel = uiText("外部供电", "External Power");
+    sourceDetail = uiText("外部输入正在为设备和电池供电", "External input is powering the device and charging the battery");
+    statusLabel = uiText("正在充电", "Charging");
     statusClass = "charging";
   } else if (powerMode === "external") {
-    sourceLabel = "外部供电";
-    sourceDetail = "检测到外部输入，电池未参与充放电";
-    statusLabel = "外部供电中";
+    sourceLabel = uiText("外部供电", "External Power");
+    sourceDetail = uiText("检测到外部输入，电池未参与充放电", "External input detected; the battery is neither charging nor discharging");
+    statusLabel = uiText("外部供电中", "Externally Powered");
     statusClass = "idle";
   } else if (powerMode === "idle") {
-    sourceLabel = externalPowerActive ? "外部供电" : "电池待机";
-    sourceDetail = externalPowerActive ? "检测到外部输入，电池未充电" : "电池当前未充电";
-    statusLabel = String(battery.status || "").toLowerCase().includes("full") ? "已充满" : "未在充放电";
-    statusClass = statusLabel === "已充满" ? "full" : "idle";
+    sourceLabel = externalPowerActive ? uiText("外部供电", "External Power") : uiText("电池待机", "Battery Idle");
+    sourceDetail = externalPowerActive ? uiText("检测到外部输入，电池未充电", "External input detected; the battery is not charging") : uiText("电池当前未充电", "The battery is not charging");
+    const full = String(battery.status || "").toLowerCase().includes("full");
+    statusLabel = full ? uiText("已充满", "Fully Charged") : uiText("未在充放电", "Idle");
+    statusClass = full ? "full" : "idle";
   }
 
   let currentPowerW = null;
   let currentPowerOrigin = "";
-  let currentPowerLabel = "当前功耗";
-  if (batterySupply && (hasSignedPower || hasPower)) {
+  let currentPowerLabel = uiText("当前功耗", "Current Power");
+  if (hasPowerSplit) {
+    currentPowerW = boardPowerEstimateW;
+    currentPowerOrigin = powerSplitDetail;
+    currentPowerLabel = uiText("主板运行功耗（估算）", "Motherboard Power (estimated)");
+  } else if (batterySupply && (hasSignedPower || hasPower)) {
     currentPowerW = Math.abs(hasSignedPower && signedBatteryPowerW !== null ? signedBatteryPowerW : (batteryPowerW || 0));
-    currentPowerOrigin = "电池端实时功率";
-    currentPowerLabel = "电池端功耗";
+    currentPowerOrigin = uiText("电池端实时功率", "Battery-side real-time power");
+    currentPowerLabel = uiText("电池端功耗", "Battery-side Power");
   } else if (inputPowerW !== null && !inputPowerIsContract) {
     currentPowerW = inputPowerW;
     currentPowerOrigin = inputPowerDetail;
     currentPowerLabel = inputPowerLabel;
   } else if (inputPowerIsContract) {
     currentPowerOrigin = inputPowerDetail;
-    currentPowerLabel = "外部输入功率";
+    currentPowerLabel = uiText("外部输入功率", "External Input Power");
   } else if (hasPower && batteryPowerW !== null) {
     currentPowerW = Math.abs(batteryPowerW);
-    currentPowerOrigin = "电池端实时功率";
-    currentPowerLabel = "电池端功耗";
+    currentPowerOrigin = uiText("电池端实时功率", "Battery-side real-time power");
+    currentPowerLabel = uiText("电池端功耗", "Battery-side Power");
   }
-  const currentPowerText = currentPowerW !== null ? `${fmtCompactNumber(currentPowerW, 3)} W` : "未上报";
+  const currentPowerText = currentPowerW !== null ? `${fmtCompactNumber(currentPowerW, 3)} W` : uiText("未上报", "Awaiting data");
   const homeMain = `${sourceLabel} · ${currentPowerText}`;
-  const homeDetail = batterySupply
-    ? `预计可用 ${runtimeText}`
+  const homeDetail = hasPowerSplit
+    ? uiText(`总输入 ${totalInputPowerText} · 电池充电 ${batteryChargingPowerText}`, `Total input ${totalInputPowerText} · Battery charging ${batteryChargingPowerText}`)
+    : batterySupply
+    ? uiText(`预计可用 ${runtimeText}`, `Estimated runtime ${runtimeText}`)
     : (currentPowerOrigin || "");
 
   return {
@@ -576,7 +779,13 @@ function batteryPresentation(battery) {
     currentPowerText,
     currentPowerOrigin,
     currentPowerLabel,
+    inputPowerLabel,
     inputPowerDetail,
+    totalInputPowerText,
+    batteryChargingPowerText,
+    boardPowerEstimateText,
+    powerSplitDetail,
+    hasPowerSplit,
     capacityText,
     batteryPowerText,
     batteryCurrentText,
@@ -585,16 +794,16 @@ function batteryPresentation(battery) {
     temperatureText,
     remainingText,
     remainingSource,
-    usableText: usableWh !== null ? fmtWh(usableWh) : "未估算",
+    usableText: usableWh !== null ? fmtWh(usableWh) : uiText("未估算", "Not estimated"),
     runtimeText,
     runtimeAvailable: runtimeHours !== null,
     batterySupply,
-    energyText: [energyNow, chargeNow].filter(Boolean).join(" / ") || "未上报",
-    fullEnergyText: [fullEnergy, fullCharge].filter(Boolean).join(" / ") || "未上报",
-    healthText: healthPercent !== null ? fmtBatteryHealth(healthPercent) : (deviceHealth || "未估算"),
-    chargeTotal: chargeTotal || "暂无统计",
-    dischargeTotal: dischargeTotal || "暂无统计",
-    inputTotal: inputTotal || "暂无统计",
+    energyText: [energyNow, chargeNow].filter(Boolean).join(" / ") || uiText("未上报", "Awaiting data"),
+    fullEnergyText: [fullEnergy, fullCharge].filter(Boolean).join(" / ") || uiText("未上报", "Awaiting data"),
+    healthText: healthPercent !== null ? fmtBatteryHealth(healthPercent) : (deviceHealth || uiText("未估算", "Not estimated")),
+    chargeTotal: chargeTotal || uiText("暂无统计", "No statistics"),
+    dischargeTotal: dischargeTotal || uiText("暂无统计", "No statistics"),
+    inputTotal: inputTotal || uiText("暂无统计", "No statistics"),
     sampleCount: metricNumber(stats.sampleCount),
     lastSampleTime: metricNumber(stats.lastSampleTime),
     statsMessage: String(stats.message || "").trim(),
@@ -607,43 +816,60 @@ function batteryText(battery) {
 }
 
 function batteryLiveMetric(label, value, detail = "") {
-  return `<div class="battery-live-item"><span>${escapeHTML(label)}</span><strong>${escapeHTML(value || "未上报")}</strong>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</div>`;
+  return `<div class="battery-live-item"><span>${escapeHTML(label)}</span><strong>${escapeHTML(value || uiText("未上报", "Awaiting data"))}</strong>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</div>`;
 }
 
 function renderBatteryLiveOverview(model) {
   const node = $("#batteryLiveOverview");
   if (!node) return;
   if (!model?.available) {
-    node.innerHTML = `<div class="empty-state">${escapeHTML(model?.statusLabel || "设备未提供电池数据")}</div>`;
+    node.innerHTML = `<div class="empty-state">${escapeHTML(model?.statusLabel || uiText("设备未提供电池数据", "The device did not provide battery data"))}</div>`;
     return;
   }
 
   const runtimeDetail = model.batterySupply
-    ? (model.runtimeAvailable ? "按当前放电功率估算" : "需要更多放电样本")
-    : "仅在电池供电时估算";
-  const sampleDetail = model.lastSampleTime ? `最近采样 ${fmtTime(model.lastSampleTime)}` : (model.statsMessage || "等待采样");
+    ? (model.runtimeAvailable ? uiText("按当前放电功率估算", "Estimated from current discharge power") : uiText("需要更多放电样本", "More discharge samples are needed"))
+    : uiText("仅在电池供电时估算", "Estimated only on battery power");
+  const sampleDetail = model.lastSampleTime ? uiText(`最近采样 ${fmtTime(model.lastSampleTime)}`, `Last sampled ${fmtTime(model.lastSampleTime)}`) : (model.statsMessage || uiText("等待采样", "Waiting for samples"));
   const critical = [
-    batteryLiveMetric("供电来源", model.sourceLabel, model.sourceDetail),
-    batteryLiveMetric("当前状态", model.statusLabel, model.statusClass === "discharging" ? "电池正在向设备供电" : ""),
-    batteryLiveMetric(model.currentPowerLabel || "当前功耗", model.currentPowerText, model.currentPowerOrigin),
-    batteryLiveMetric("预计可用", model.batterySupply ? model.runtimeText : "--", runtimeDetail),
+    batteryLiveMetric(uiText("供电来源", "Power Source"), model.sourceLabel, model.sourceDetail),
+    batteryLiveMetric(uiText("当前状态", "Current State"), model.statusLabel, model.statusClass === "discharging" ? uiText("电池正在向设备供电", "The battery is powering the device") : ""),
+    ...(model.hasPowerSplit
+      ? [
+        batteryLiveMetric(model.inputPowerLabel || uiText("总输入功率", "Total Input Power"), model.totalInputPowerText, model.inputPowerDetail),
+        batteryLiveMetric(uiText("电池充电功率", "Battery Charging Power"), model.batteryChargingPowerText, uiText("电池端实时功率", "Battery-side real-time power")),
+        batteryLiveMetric(uiText("主板运行功耗（估算）", "Motherboard Power (estimated)"), model.boardPowerEstimateText, model.powerSplitDetail),
+      ]
+      : [batteryLiveMetric(model.currentPowerLabel || uiText("当前功耗", "Current Power"), model.currentPowerText, model.currentPowerOrigin)]),
+    batteryLiveMetric(uiText("预计可用", "Estimated Runtime"), model.batterySupply ? model.runtimeText : "--", runtimeDetail),
   ].join("");
+  const powerDetails = model.hasPowerSplit
+    ? [
+      batteryLiveMetric(uiText("电池电流", "Battery Current"), model.batteryCurrentText, uiText("正值充电，负值放电", "Positive charges; negative discharges")),
+      batteryLiveMetric(uiText("总输入详情", "Total Input Details"), model.inputText, model.inputPowerDetail),
+    ]
+    : [
+      batteryLiveMetric(uiText("电池功率", "Battery Power"), model.batteryPowerText, uiText("正值充电，负值放电", "Positive charges; negative discharges")),
+      batteryLiveMetric(uiText("电池电流", "Battery Current"), model.batteryCurrentText, uiText("正值充电，负值放电", "Positive charges; negative discharges")),
+      batteryLiveMetric(uiText("外部输入", "External Input"), model.inputText, model.inputPowerDetail),
+    ];
   const details = [
-    batteryLiveMetric("电量", model.capacityText, `剩余能量 ${model.remainingText}${model.remainingSource ? ` · ${model.remainingSource}` : ""}`),
-    batteryLiveMetric("电池功率", model.batteryPowerText, "正值充电，负值放电"),
-    batteryLiveMetric("电池电流", model.batteryCurrentText, "正值充电，负值放电"),
-    batteryLiveMetric("外部输入", model.inputText, model.inputPowerDetail),
-    batteryLiveMetric("电池电压", model.voltageText),
-    batteryLiveMetric("电池温度", model.temperatureText),
-    batteryLiveMetric("当前能量", model.energyText),
-    batteryLiveMetric("满电容量", model.fullEnergyText, `估算可用 ${model.usableText}`),
-    batteryLiveMetric("电池健康", model.healthText),
-    batteryLiveMetric("累计充电", model.chargeTotal),
-    batteryLiveMetric("累计放电", model.dischargeTotal),
-    batteryLiveMetric("输入累计", model.inputTotal),
-    batteryLiveMetric("采样", model.sampleCount !== null ? `${model.sampleCount} 条` : "未上报", sampleDetail),
+    batteryLiveMetric(uiText("电量", "Charge"), model.capacityText, uiText(`剩余能量 ${model.remainingText}${model.remainingSource ? ` · ${model.remainingSource}` : ""}`, `Remaining energy ${model.remainingText}${model.remainingSource ? ` · ${model.remainingSource}` : ""}`)),
+    ...powerDetails,
+    batteryLiveMetric(uiText("电池电压", "Battery Voltage"), model.voltageText),
+    batteryLiveMetric(uiText("电池温度", "Battery Temperature"), model.temperatureText),
+    batteryLiveMetric(uiText("当前能量", "Current Energy"), model.energyText),
+    batteryLiveMetric(uiText("满电容量", "Full Capacity"), model.fullEnergyText, uiText(`估算可用 ${model.usableText}`, `Estimated usable ${model.usableText}`)),
+    batteryLiveMetric(uiText("电池健康", "Battery Health"), model.healthText),
+    batteryLiveMetric(uiText("累计充电", "Total Charge"), model.chargeTotal),
+    batteryLiveMetric(uiText("累计放电", "Total Discharge"), model.dischargeTotal),
+    batteryLiveMetric(uiText("输入累计", "Total Input"), model.inputTotal),
+    batteryLiveMetric(uiText("采样", "Samples"), model.sampleCount !== null ? uiText(`${model.sampleCount} 条`, `${model.sampleCount}`) : uiText("未上报", "Awaiting data"), sampleDetail),
   ].join("");
-  node.innerHTML = `<div class="battery-live-head ${escapeHTML(model.statusClass)}"><div><span>实时供电状态</span><strong>${escapeHTML(model.statusLabel)}</strong><p>${escapeHTML(model.sourceDetail)}</p></div><div><span>当前供电</span><strong>${escapeHTML(model.sourceLabel)}</strong><p>${escapeHTML(model.currentPowerText)}</p></div></div><div class="battery-live-grid battery-live-critical">${critical}</div><div class="battery-live-grid">${details}</div><p class="battery-live-note">电池端功率和电流：正值表示充电，负值表示放电；外部输入功率包含充电和转换损耗，不等同于设备净功耗。</p>`;
+  const powerNote = model.hasPowerSplit
+    ? uiText("主板运行功耗按总输入功率减电池充电功率估算，包含充电与电源转换损耗；没有独立电源轨传感器时，它不是直接测得的主板功耗。", "Motherboard power is estimated as total input minus battery charging power. It includes battery-charging and power-conversion losses, so it is not a direct motherboard-rail measurement.")
+    : uiText("电池端功率和电流：正值表示充电，负值表示放电；外部输入功率包含充电和转换损耗，不等同于设备净功耗。", "Battery power and current: positive charges and negative discharges. External input includes charging and conversion losses, so it is not the device net power draw.");
+  node.innerHTML = `<div class="battery-live-head ${escapeHTML(model.statusClass)}"><div><span>${uiText("实时供电状态", "Live Power State")}</span><strong>${escapeHTML(model.statusLabel)}</strong><p>${escapeHTML(model.sourceDetail)}</p></div><div><span>${model.hasPowerSplit ? uiText("主板运行功耗（估算）", "Motherboard Power (estimated)") : uiText("当前供电", "Current Supply")}</span><strong>${escapeHTML(model.hasPowerSplit ? model.currentPowerText : model.sourceLabel)}</strong><p>${escapeHTML(model.hasPowerSplit ? model.powerSplitDetail : model.currentPowerText)}</p></div></div><div class="battery-live-grid battery-live-critical${model.hasPowerSplit ? " power-split" : ""}">${critical}</div><div class="battery-live-grid">${details}</div><p class="battery-live-note">${escapeHTML(powerNote)}</p>`;
 }
 
 function firstValue(...values) {
@@ -655,12 +881,12 @@ function nestedValue(object, path) {
 }
 
 function fmtDisk(value) {
-  if (!value) return "未知";
+  if (!value) return uiText("未知", "Unknown");
   return fmtBytes(value);
 }
 
 function fmtSize(bytes) {
-  if (!bytes) return "未知大小";
+  if (!bytes) return uiText("未知大小", "Unknown size");
   return fmtBytes(bytes);
 }
 
@@ -751,7 +977,7 @@ function rootfsAssetSource(asset) {
   const downloadURL = rootfsAssetDownloadURL(asset);
   if (isLinuxContainersCNMirrorURL(downloadURL) || isLinuxContainersCNMirrorSource(source)) return LINUX_CONTAINERS_CN_MIRROR_NAME;
   if (isLinuxContainersSource(source) || isLinuxContainersURL(downloadURL)) return LINUX_CONTAINERS_NAME;
-  return String(source || "未标注来源").trim() || "未标注来源";
+  return String(source || uiText("未标注来源", "Unlabeled source")).trim() || uiText("未标注来源", "Unlabeled source");
 }
 
 function isDroidspacesOfficialRootfsDownloadURL(value) {
@@ -769,7 +995,7 @@ function rootfsAssetVariant(asset) {
 }
 
 function rootfsCloudVariant(asset) {
-  return String(asset?.variant || "").trim() || "默认";
+  return String(asset?.variant || "").trim() || uiText("默认", "Default");
 }
 
 function isTinyCloudRootfsAsset(asset) {
@@ -799,7 +1025,7 @@ function localRootfsArchitecture(item) {
     [/(?:^|[-_.\s])(?:x86_64|amd64)(?:$|[-_.\s])/, "x86_64"],
     [/(?:^|[-_.\s])(?:x86|i386)(?:$|[-_.\s])/, "x86"],
   ];
-  return architectures.find(([pattern]) => pattern.test(name))?.[1] || "未知架构";
+  return architectures.find(([pattern]) => pattern.test(name))?.[1] || uiText("未知架构", "Unknown architecture");
 }
 
 function localRootfsVariant(item) {
@@ -808,12 +1034,12 @@ function localRootfsVariant(item) {
   const name = String(firstValue(item?.name, item?.path) || "").toLowerCase();
   const match = name.match(/(?:^|[-_.\s])(minimal|default|base|cloud|server|desktop|xfce|kde|gnome)(?:$|[-_.\s])/i);
   if (match) return match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase();
-  return item?.kind === "directory" ? "目录" : "标准";
+  return item?.kind === "directory" ? uiText("目录", "Directory") : uiText("标准", "Standard");
 }
 
 function rootfsDisplayName(item) {
   let name = String(firstValue(item?.name, item?.Name) || "").trim();
-  if (!name) return "未命名";
+  if (!name) return uiText("未命名", "Unnamed");
 
   // Downloaded cloud assets include an internal, collision-resistant suffix. It is
   // useful on disk, but makes a template selector and image card hard to scan.
@@ -858,7 +1084,7 @@ function rootfsDisplayName(item) {
       return [label, displayRootfsRelease(label, release)].filter(Boolean).join(" ");
     }
   }
-  return normalized || "未命名";
+  return normalized || uiText("未命名", "Unnamed");
 }
 
 function displayRootfsRelease(distribution, release) {
@@ -894,7 +1120,7 @@ function displayRootfsRelease(distribution, release) {
 }
 
 function localRootfsSource(item) {
-  return String(firstValue(item?.source, item?.storageSource) || "本地模板").trim() || "本地模板";
+  return String(firstValue(item?.source, item?.storageSource) || uiText("本地模板", "Local template")).trim() || uiText("本地模板", "Local template");
 }
 
 function rootfsAssetOptionLabel(asset) {
@@ -906,10 +1132,10 @@ function rootfsAssetOptionLabel(asset) {
 }
 
 function statusBadge(container) {
-  if (!container.running) return `<span class="badge stopped">已停止</span>`;
+  if (!container.running) return `<span class="badge stopped">${uiText("已停止", "Stopped")}</span>`;
   const runtime = containerRuntimeInfo(container);
   const attrs = runtime.seconds === null ? "" : ` data-container-runtime-seconds="${runtime.seconds}" data-container-runtime-sampled-at="${Date.now()}"`;
-  return `<span class="badge running" title="容器运行时间"${attrs}>${escapeHTML(runtime.text)}</span>`;
+  return `<span class="badge running" title="${uiText("容器运行时间", "Container uptime")}"${attrs}>${escapeHTML(runtime.text)}</span>`;
 }
 
 // Keep this order and matching behavior aligned with Android IconUtils.kt.
@@ -958,7 +1184,7 @@ function rootfsDistroInfo(item) {
 function rootfsDistroIcon(item, className = "") {
   const info = rootfsDistroInfo(item);
   const classes = ["distro-icon", "rootfs-distro-icon", `distro-${info.id}`, className].filter(Boolean).join(" ");
-  const label = `系统：${info.label}`;
+  const label = uiText(`系统：${info.label}`, `System: ${info.label}`);
   return `<span class="${classes}" style="--distro-icon: url('/assets/distro/${info.id}.svg')" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></span>`;
 }
 
@@ -968,7 +1194,7 @@ function rootfsHasOfficialSupport(asset) {
 }
 
 function rootfsUnsupportedBadge() {
-  return '<span class="badge rootfs-support-note" title="该模板不在 Droidspaces 官方模板列表中">非官方支持系统</span>';
+  return `<span class="badge rootfs-support-note" title="${uiText("该模板不在 Droidspaces 官方模板列表中", "This template is not in the official Droidspaces template list")}">${uiText("非官方支持系统", "Unofficial system")}</span>`;
 }
 
 function rootfsSupportBadge(asset) {
@@ -1007,7 +1233,7 @@ function containerDistroIcon(container, className = "") {
   const info = containerDistroInfo(container);
   const stateClass = container?.running ? "running" : "stopped";
   const classes = ["distro-icon", `distro-${info.id}`, stateClass, className].filter(Boolean).join(" ");
-  const label = `系统：${info.label}`;
+  const label = uiText(`系统：${info.label}`, `System: ${info.label}`);
   return `<span class="${classes}" style="--distro-icon: url('/assets/distro/${info.id}.svg')" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></span>`;
 }
 
@@ -1023,7 +1249,7 @@ function portRules(ports) {
 
 function portText(ports) {
   const rules = portRules(ports);
-  return rules.length ? rules.join(", ") : "无";
+  return rules.length ? rules.join(", ") : uiText("无", "None");
 }
 
 function portLines(ports) {
@@ -1091,20 +1317,20 @@ function createPortRange(value) {
 
 function parseCreatePortForwards(value) {
   const rawItems = String(value || "").split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
-  if (rawItems.length > 32) return { error: "端口转发最多只能设置 32 条规则" };
+  if (rawItems.length > 32) return { error: uiText("端口转发最多只能设置 32 条规则", "Port forwarding can contain at most 32 rules") };
   const parsed = [];
   for (const raw of rawItems) {
     const slashParts = raw.split("/");
-    if (slashParts.length > 2) return { error: "端口转发规则“" + raw + "”格式错误，应为 主机端口:容器端口/协议" };
+    if (slashParts.length > 2) return { error: uiText(`端口转发规则“${raw}”格式错误，应为 主机端口:容器端口/协议`, `Port forwarding rule “${raw}” is invalid; use host-port:container-port/protocol`) };
     const protocol = String(slashParts[1] || "tcp").trim().toLowerCase();
-    if (!["tcp", "udp"].includes(protocol)) return { error: "端口转发规则“" + raw + "”的协议只能是 tcp 或 udp" };
+    if (!["tcp", "udp"].includes(protocol)) return { error: uiText(`端口转发规则“${raw}”的协议只能是 tcp 或 udp`, `The protocol in port forwarding rule “${raw}” must be tcp or udp`) };
     const sides = slashParts[0].split(":");
-    if (sides.length > 2) return { error: "端口转发规则“" + raw + "”只能包含一个冒号" };
+    if (sides.length > 2) return { error: uiText(`端口转发规则“${raw}”只能包含一个冒号`, `Port forwarding rule “${raw}” can contain only one colon`) };
     const host = createPortRange(sides[0]);
     const container = createPortRange(sides.length === 2 ? sides[1] : sides[0]);
-    if (!host) return { error: "端口转发规则“" + raw + "”的主机端口必须是 1-65535 的端口或范围" };
-    if (!container) return { error: "端口转发规则“" + raw + "”的容器端口必须是 1-65535 的端口或范围" };
-    if (host.end - host.start !== container.end - container.start) return { error: "端口转发规则“" + raw + "”的主机和容器范围长度必须一致" };
+    if (!host) return { error: uiText(`端口转发规则“${raw}”的主机端口必须是 1-65535 的端口或范围`, `The host port in rule “${raw}” must be a port or range from 1 to 65535`) };
+    if (!container) return { error: uiText(`端口转发规则“${raw}”的容器端口必须是 1-65535 的端口或范围`, `The container port in rule “${raw}” must be a port or range from 1 to 65535`) };
+    if (host.end - host.start !== container.end - container.start) return { error: uiText(`端口转发规则“${raw}”的主机和容器范围长度必须一致`, `Host and container port ranges in rule “${raw}” must have the same length`) };
     parsed.push({ host, container, protocol, raw });
   }
   for (let i = 0; i < parsed.length; i += 1) {
@@ -1112,8 +1338,8 @@ function parseCreatePortForwards(value) {
       if (parsed[i].protocol !== parsed[j].protocol) continue;
       const hostOverlap = parsed[i].host.start <= parsed[j].host.end && parsed[j].host.start <= parsed[i].host.end;
       const containerOverlap = parsed[i].container.start <= parsed[j].container.end && parsed[j].container.start <= parsed[i].container.end;
-      if (hostOverlap) return { error: "端口转发规则“" + parsed[i].raw + "”与“" + parsed[j].raw + "”的主机端口重复" };
-      if (containerOverlap) return { error: "端口转发规则“" + parsed[i].raw + "”与“" + parsed[j].raw + "”的容器端口重复" };
+      if (hostOverlap) return { error: uiText(`端口转发规则“${parsed[i].raw}”与“${parsed[j].raw}”的主机端口重复`, `Host ports overlap between rules “${parsed[i].raw}” and “${parsed[j].raw}”`) };
+      if (containerOverlap) return { error: uiText(`端口转发规则“${parsed[i].raw}”与“${parsed[j].raw}”的容器端口重复`, `Container ports overlap between rules “${parsed[i].raw}” and “${parsed[j].raw}”`) };
     }
   }
   return { ports: parsed };
@@ -1136,7 +1362,7 @@ function validateCreatePortForwardAvailability(value) {
         const overlaps = requested.host.start <= hostEnd && hostStart <= requested.host.end;
         if (!overlaps) continue;
         const range = hostStart === hostEnd ? String(hostStart) : `${hostStart}-${hostEnd}`;
-        return `主机 ${requested.protocol.toUpperCase()} 端口与容器“${container.name}”的 ${range} 冲突`;
+        return uiText(`主机 ${requested.protocol.toUpperCase()} 端口与容器“${container.name}”的 ${range} 冲突`, `Host ${requested.protocol.toUpperCase()} port conflicts with ${range} on container “${container.name}”`);
       }
     }
   }
@@ -1147,12 +1373,12 @@ function validateCreateMemoryLimit(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "0" || text === "none" || text === "unlimited") return "";
   const match = text.match(/^([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b?|bytes?)?$/i);
-  if (!match || Number(match[1]) <= 0) return "内存限制应填写正数，例如 512M 或 2G";
+  if (!match || Number(match[1]) <= 0) return uiText("内存限制应填写正数，例如 512M 或 2G", "Memory limit must be a positive number, such as 512M or 2G");
   let unit = String(match[2] || "").toLowerCase();
   unit = unit.replace(/bytes?$/, "").replace(/b$/, "").replace(/i$/, "");
   const multipliers = { "": 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4 };
   const bytes = Number(match[1]) * (multipliers[unit] || 0);
-  if (!Number.isFinite(bytes) || bytes < 4 * 1024 * 1024) return "内存限制不能小于 4 MiB";
+  if (!Number.isFinite(bytes) || bytes < 4 * 1024 * 1024) return uiText("内存限制不能小于 4 MiB", "Memory limit cannot be less than 4 MiB");
   return "";
 }
 
@@ -1160,23 +1386,23 @@ function validateCreateCPU(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "0" || text === "none" || text === "unlimited") return "";
   const number = Number(text);
-  if (!Number.isFinite(number) || number <= 0) return "CPU 限制应填写大于 0 的数字";
-  if (number > 1024) return "CPU 限制不能超过 1024";
+  if (!Number.isFinite(number) || number <= 0) return uiText("CPU 限制应填写大于 0 的数字", "CPU limit must be a number greater than 0");
+  if (number > 1024) return uiText("CPU 限制不能超过 1024", "CPU limit cannot exceed 1024");
   return "";
 }
 
 function validateCreatePids(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text || text === "0" || text === "none" || text === "unlimited") return "";
-  if (!/^\d+$/.test(text) || Number(text) <= 0) return "PIDs 限制应填写正整数";
-  if (Number(text) > 4194304) return "PIDs 限制不能超过 4194304";
+  if (!/^\d+$/.test(text) || Number(text) <= 0) return uiText("PIDs 限制应填写正整数", "PIDs limit must be a positive integer");
+  if (Number(text) > 4194304) return uiText("PIDs 限制不能超过 4194304", "PIDs limit cannot exceed 4194304");
   return "";
 }
 
 function validateCreateSafeText(value, label, allowNewline = false) {
   const text = String(value || "");
-  if (text.includes(String.fromCharCode(0))) return `${label}不能包含 NUL 字符`;
-  if (text.includes("\r") || (!allowNewline && text.includes("\n"))) return `${label}不能包含换行`;
+  if (text.includes(String.fromCharCode(0))) return uiText(`${label}不能包含 NUL 字符`, `${label} cannot contain NUL characters`);
+  if (text.includes("\r") || (!allowNewline && text.includes("\n"))) return uiText(`${label}不能包含换行`, `${label} cannot contain line breaks`);
   return "";
 }
 
@@ -1185,11 +1411,11 @@ function validateCreateBinds(value) {
   for (const item of items) {
     const parts = item.split(":").map((part) => part.trim());
     if (parts.length < 2 || parts.length > 3 || !parts[0] || !parts[1]) {
-      return `绑定挂载“${item}”格式错误，应为 源路径:容器路径[:ro]`;
+      return uiText(`绑定挂载“${item}”格式错误，应为 源路径:容器路径[:ro]`, `Bind mount “${item}” is invalid; use source-path:container-path[:ro]`);
     }
-    if (!parts[1].startsWith("/")) return `绑定挂载“${item}”的容器路径必须是绝对路径`;
+    if (!parts[1].startsWith("/")) return uiText(`绑定挂载“${item}”的容器路径必须是绝对路径`, `The container path in bind mount “${item}” must be absolute`);
     if (parts.length === 3 && parts[2].toLowerCase() !== "ro") {
-      return `绑定挂载“${item}”的第三段只能填写 ro`;
+      return uiText(`绑定挂载“${item}”的第三段只能填写 ro`, `The third segment in bind mount “${item}” can only be ro`);
     }
   }
   return "";
@@ -1198,8 +1424,8 @@ function validateCreateBinds(value) {
 function validateCreateInit(value) {
   const text = String(value || "").trim();
   if (!text) return "";
-  if (!text.startsWith("/")) return "Init 路径必须是绝对路径（以 / 开头）";
-  if (text.includes(" ")) return "Init 路径不能包含空格";
+  if (!text.startsWith("/")) return uiText("Init 路径必须是绝对路径（以 / 开头）", "Init path must be absolute (start with /)");
+  if (text.includes(" ")) return uiText("Init 路径不能包含空格", "Init path cannot contain spaces");
   return "";
 }
 
@@ -1245,7 +1471,7 @@ function updateStaticNATIP(prefix) {
   const valid4 = staticNATOctetValid(value4, 1, 254);
   if (octet4) {
     octet4.classList.toggle("invalid", !valid4);
-    octet4.setCustomValidity(valid4 ? "" : "第 4 字节范围：1-254");
+    octet4.setCustomValidity(valid4 ? "" : uiText("第 4 字节范围：1-254", "Fourth octet range: 1-254"));
   }
   if (hidden) hidden.value = staticNATIPValue(prefix);
 }
@@ -1268,7 +1494,7 @@ function containerCpuText(container) {
   const period = firstValue(container.cpuPeriod, container.cpu_period);
   const percent = firstValue(container.cpuUsage, container.cpuPercent, nestedValue(container, "resources.cpuUsage"), nestedValue(container, "resources.cpuPercent"));
   if (percent !== undefined) return fmtPercent(percent);
-  if (quota) return `${quota}/${period || "默认"}`;
+  if (quota) return `${quota}/${period || uiText("默认", "default")}`;
   return "-";
 }
 
@@ -1305,17 +1531,17 @@ function containerUsageText(usage) {
 function containerMemoryText(container) {
   const text = containerUsageText(container?.memoryUsage);
   if (text) return text;
-  return container?.running ? "待采样" : "-";
+  return container?.running ? uiText("待采样", "Awaiting sample") : "-";
 }
 
 function containerMemoryLabel(container) {
   switch (String(container?.memoryUsageSource || "").trim()) {
     case "core-rss":
-      return "进程内存";
+      return uiText("进程内存", "Process Memory");
     case "cgroup-memory.current":
-      return "Cgroup 内存";
+      return uiText("Cgroup 内存", "Cgroup Memory");
     default:
-      return "内存";
+      return uiText("内存", "Memory");
   }
 }
 
@@ -1330,10 +1556,10 @@ function containerCgroupMemoryRows(container) {
   const total = containerUsageText(usage);
   if (!total) return [];
   return [
-    ["Cgroup 总占用（含缓存）", total],
-    ["文件缓存", cgroupMemoryComponentText(usage, "fileBytes")],
-    ["匿名内存", cgroupMemoryComponentText(usage, "anonBytes")],
-    ["内核内存", cgroupMemoryComponentText(usage, "kernelBytes")],
+    [uiText("Cgroup 总占用（含缓存）", "Cgroup Total (including cache)"), total],
+    [uiText("文件缓存", "File Cache"), cgroupMemoryComponentText(usage, "fileBytes")],
+    [uiText("匿名内存", "Anonymous Memory"), cgroupMemoryComponentText(usage, "anonBytes")],
+    [uiText("内核内存", "Kernel Memory"), cgroupMemoryComponentText(usage, "kernelBytes")],
   ];
 }
 
@@ -1457,8 +1683,8 @@ function syncForcedDisableIPv6(netSelector, checkboxSelector) {
   }
   if (desc) {
     desc.textContent = forced
-      ? "在 NAT 和 None 网络模式下，IPv6 始终被禁用。"
-      : "在此容器中禁用 IPv6。这可能会导致宿主机的 VPN 应用异常。";
+      ? uiText("在 NAT 和 None 网络模式下，IPv6 始终被禁用。", "IPv6 is always disabled in NAT and None network modes.")
+      : uiText("在此容器中禁用 IPv6。这可能会导致宿主机的 VPN 应用异常。", "Disable IPv6 in this container. This can affect VPN applications on the host.");
   }
 }
 
@@ -1488,16 +1714,16 @@ function toggleExtraFlagField(prefix, key, enabled) {
 
 function taskLabel(kind) {
   const labels = {
-    "rootfs-download": "镜像下载",
-    "core-update": "核心更新",
-    "container-export": "容器备份",
-    "container-template": "转换为模板",
-    "container-start": "启动容器",
-    "container-stop": "停止容器",
-    "container-restart": "重启容器",
-    "container-delete": "删除容器",
+    "rootfs-download": uiText("镜像下载", "Image download"),
+    "core-update": uiText("核心更新", "Core update"),
+    "container-export": uiText("容器备份", "Container backup"),
+    "container-template": uiText("转换为模板", "Convert to template"),
+    "container-start": uiText("启动容器", "Start container"),
+    "container-stop": uiText("停止容器", "Stop container"),
+    "container-restart": uiText("重启容器", "Restart container"),
+    "container-delete": uiText("删除容器", "Delete container"),
   };
-  return labels[kind] || kind || "任务";
+  return labels[kind] || kind || uiText("任务", "Task");
 }
 
 const CONTAINER_OPERATION_ACTIONS = new Set(["start", "stop", "restart", "delete"]);
@@ -1521,7 +1747,12 @@ function containerOperationAction(kind) {
 }
 
 function containerOperationLabel(action) {
-  return ({ start: "启动", stop: "停止", restart: "重启", delete: "删除" })[action] || action || "操作";
+  return ({
+    start: uiText("启动", "Start"),
+    stop: uiText("停止", "Stop"),
+    restart: uiText("重启", "Restart"),
+    delete: uiText("删除", "Delete"),
+  })[action] || action || uiText("操作", "Action");
 }
 
 function containerTaskForName(name) {
@@ -1585,8 +1816,8 @@ function refreshContainerOperationUI() {
 }
 
 function sourceLabel(source) {
-  const labels = { socketd: "socketd", cli: "CLI", workspace: "工作区" };
-  return labels[source] || source || "未知";
+  const labels = { socketd: "socketd", cli: "CLI", workspace: uiText("工作区", "Workspace") };
+  return labels[source] || source || uiText("未知", "Unknown");
 }
 
 function recordBackendError(source, message, hint = "") {
@@ -1626,13 +1857,13 @@ function mergeBackendErrors(entries) {
 
 function backendText(value) {
   const labels = {
-    ready: "就绪",
-    unreachable: "不可达",
-    "cli-fallback": "CLI 兜底",
-    "workspace-fallback": "工作区兜底",
-    "socketd-disabled": "socketd 已禁用",
+    ready: uiText("就绪", "Ready"),
+    unreachable: uiText("不可达", "Unreachable"),
+    "cli-fallback": uiText("CLI 兜底", "CLI fallback"),
+    "workspace-fallback": uiText("工作区兜底", "Workspace fallback"),
+    "socketd-disabled": uiText("socketd 已禁用", "socketd disabled"),
   };
-  return labels[value] || value || "未知";
+  return labels[value] || value || uiText("未知", "Unknown");
 }
 
 function backendHasUsableFallback(value) {
@@ -1792,7 +2023,7 @@ async function loadStatus(refreshCoreVersion = false) {
   renderSecurity();
   if (data.backendError) {
     const isNew = recordBackendError("status", data.backendError, data.backendErrorHint);
-    if (isNew && !backendHasUsableFallback(data.backend)) toast(`后端提示：${data.backendError}`);
+    if (isNew && !backendHasUsableFallback(data.backend)) toast(uiText(`后端提示：${data.backendError}`, `Backend notice: ${data.backendError}`));
   }
   if (data.fallbackError) recordBackendError("fallback", data.fallbackError);
 }
@@ -1835,22 +2066,22 @@ function renderWebUILog() {
   if (!output || !meta) return;
   const log = state.webuiLog;
   const lines = safeArray(log.lines).map((line) => String(line));
-  if (!log.loaded) output.textContent = "等待读取 WebUI 服务日志";
-  else if (log.error && !lines.length) output.textContent = `读取日志失败：${log.error}`;
-  else if (!log.exists) output.textContent = "WebUI 服务日志文件尚不存在。服务写入日志后会自动显示。";
-  else output.textContent = lines.length ? lines.join("\n") : "日志文件为空";
+  if (!log.loaded) output.textContent = uiText("等待读取 WebUI 服务日志", "Waiting to read the WebUI service log");
+  else if (log.error && !lines.length) output.textContent = uiText(`读取日志失败：${log.error}`, `Failed to read log: ${log.error}`);
+  else if (!log.exists) output.textContent = uiText("WebUI 服务日志文件尚不存在。服务写入日志后会自动显示。", "The WebUI service log does not exist yet. It will appear when the service writes logs.");
+  else output.textContent = lines.length ? lines.join("\n") : uiText("日志文件为空", "Log file is empty");
 
   const details = [];
   if (log.path) details.push(log.path);
-  if (!log.loaded) details.push("等待读取");
-  else if (log.error) details.push(`读取失败：${log.error}`);
-  else if (!log.exists) details.push("日志文件不存在");
+  if (!log.loaded) details.push(uiText("等待读取", "Waiting to read"));
+  else if (log.error) details.push(uiText(`读取失败：${log.error}`, `Read failed: ${log.error}`));
+  else if (!log.exists) details.push(uiText("日志文件不存在", "Log file does not exist"));
   else {
-    details.push(`${lines.length} 行`);
-    if (log.truncated) details.push(`仅显示末尾 ${normalizedWebUILogTail()} 行`);
-    if (log.updatedAt) details.push(`更新于 ${fmtTime(log.updatedAt)}`);
+    details.push(uiText(`${lines.length} 行`, `${lines.length} lines`));
+    if (log.truncated) details.push(uiText(`仅显示末尾 ${normalizedWebUILogTail()} 行`, `Showing the last ${normalizedWebUILogTail()} lines`));
+    if (log.updatedAt) details.push(uiText(`更新于 ${fmtTime(log.updatedAt)}`, `Updated ${fmtTime(log.updatedAt)}`));
   }
-  details.push(state.webuiLogAutoFollow ? "自动跟随" : "自动刷新已暂停");
+  details.push(state.webuiLogAutoFollow ? uiText("自动跟随", "Auto-follow") : uiText("自动刷新已暂停", "Auto-refresh paused"));
   meta.textContent = details.join(" · ");
   if (state.webuiLogAutoFollow) output.scrollTop = output.scrollHeight;
 }
@@ -1873,7 +2104,7 @@ async function loadWebUILog() {
       loaded: true,
     };
   } catch (err) {
-    state.webuiLog = { ...state.webuiLog, error: err.message || "未知错误", updatedAt: Math.floor(Date.now() / 1000), loaded: true };
+    state.webuiLog = { ...state.webuiLog, error: err.message || uiText("未知错误", "Unknown error"), updatedAt: Math.floor(Date.now() / 1000), loaded: true };
   } finally {
     state.webuiLogLoading = false;
     if (refreshButton) refreshButton.disabled = state.busy;
@@ -2001,10 +2232,12 @@ function renderDeviceMetrics() {
     ? Math.min((usedMemoryBytes / totalMemoryBytes) * 100, 100)
     : usagePercentValue(memPercent);
   const cpuCores = firstValue(host.numCPU, status.numCPU, nestedValue(device, "numCPU"), nestedValue(runtime, "numCPU"));
-  const cpuDetail = cpuCores !== undefined ? `${cpuCores} 核 · 主机整体使用率` : "主机整体使用率";
+  const cpuDetail = cpuCores !== undefined
+    ? uiText(`${cpuCores} 核 · 主机整体使用率`, `${cpuCores} cores · overall host usage`)
+    : uiText("主机整体使用率", "Overall host usage");
   const memoryDetail = usedMemoryBytes !== null || totalMemoryBytes !== null
     ? `${fmtBytesOptional(usedMemoryBytes)} / ${fmtBytesOptional(totalMemoryBytes)}`
-    : memoryPercent !== null ? "总容量未上报" : "已用 / 总量待上报";
+    : memoryPercent !== null ? uiText("总容量未上报", "Total capacity unavailable") : uiText("已用 / 总量待上报", "Usage / total awaiting data");
   const batteryStats = firstValue(nestedValue(battery, "stats"), nestedValue(host, "battery.stats"), nestedValue(status, "battery.stats"), nestedValue(resources, "battery.stats"));
   const batteryInfo = batteryText({
     ...battery,
@@ -2012,15 +2245,15 @@ function renderDeviceMetrics() {
     directPowerSupported: Boolean(status.batteryDirectPowerSupported || host.batteryDirectPowerSupported || state.systemSettings.batteryDirectPowerSupported),
   });
   const values = {
-    systemVersion: systemVersion || "未知",
-    kernelVersion: kernelVersion || "未知",
+    systemVersion: systemVersion || uiText("未知", "Unknown"),
+    kernelVersion: kernelVersion || uiText("未知", "Unknown"),
     deviceUptime: formatDeviceUptime(uptimeSeconds),
     cpuUsage: usagePercentText(cpuUsage),
     cpuUsageDetail: cpuDetail,
     memoryUsage: usagePercentText(memoryPercent),
     memoryUsageDetail: memoryDetail,
-    networkIO: netText || "待上报",
-    overviewPowerLabel: batteryInfo.model.homeMetricLabel || "当前功耗",
+    networkIO: netText || uiText("待上报", "Awaiting data"),
+    overviewPowerLabel: batteryInfo.model.homeMetricLabel || uiText("当前功耗", "Current Power"),
     batteryMain: batteryInfo.main,
     batteryDetail: batteryInfo.detail,
   };
@@ -2030,20 +2263,23 @@ function renderDeviceMetrics() {
   });
   const batteryDetailNode = $("#batteryDetail");
   if (batteryDetailNode) batteryDetailNode.hidden = !batteryInfo.detail;
-  setUsageMeter("cpuUsageMeter", cpuPercent, "CPU 使用率");
-  setUsageMeter("memoryUsageMeter", memoryPercent, "内存使用率");
+  setUsageMeter("cpuUsageMeter", cpuPercent, uiText("CPU 使用率", "CPU usage"));
+  setUsageMeter("memoryUsageMeter", memoryPercent, uiText("内存使用率", "Memory usage"));
   renderBatteryLiveOverview(batteryInfo.model);
 }
 
 function formatDeviceUptime(value) {
   const rawSeconds = metricNumber(value);
-  if (rawSeconds === null || rawSeconds < 0) return "待上报";
+  if (rawSeconds === null || rawSeconds < 0) return uiText("待上报", "Awaiting data");
   const totalSeconds = Math.floor(rawSeconds);
   const days = Math.floor(totalSeconds / 86400);
   const hours = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return [days ? `${days} 天` : "", hours ? `${hours} 小时` : "", minutes ? `${minutes} 分钟` : "", `${seconds} 秒`].filter(Boolean).join(" ");
+  return uiText(
+    [days ? `${days} 天` : "", hours ? `${hours} 小时` : "", minutes ? `${minutes} 分钟` : "", `${seconds} 秒`].filter(Boolean).join(" "),
+    [days ? `${days}d` : "", hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", `${seconds}s`].filter(Boolean).join(" ")
+  );
 }
 
 function renderBackendSummary() {
@@ -2051,14 +2287,14 @@ function renderBackendSummary() {
   if (!node) return;
   const data = state.status || {};
   const rows = [
-    ["状态", backendText(data.backend)],
-    ["当前核心", data.coreVersion || "未知"],
-    ["适配核心", data.supportedCoreVersion || "-"],
-    ["数据源", sourceLabel(data.fallbackSource || data.backend)],
-    ["监听模式", data.mode || "-"],
-    ["授权", data.authEnabled ? "已启用" : "未启用"],
-    ["socketd", data.socketdEnabled ? "启用" : "禁用"],
-    ["镜像仓库", `${data.rootfsRepoCount ?? 0} 个`],
+    [uiText("状态", "Status"), backendText(data.backend)],
+    [uiText("当前核心", "Current Core"), data.coreVersion || uiText("未知", "Unknown")],
+    [uiText("适配核心", "Supported Core"), data.supportedCoreVersion || "-"],
+    [uiText("数据源", "Data Source"), sourceLabel(data.fallbackSource || data.backend)],
+    [uiText("监听模式", "Listen Mode"), data.mode || "-"],
+    [uiText("授权", "Authorization"), data.authEnabled ? uiText("已启用", "Enabled") : uiText("未启用", "Disabled")],
+    ["socketd", data.socketdEnabled ? uiText("启用", "Enabled") : uiText("禁用", "Disabled")],
+    [uiText("镜像仓库", "Image Repositories"), uiText(`${data.rootfsRepoCount ?? 0} 个`, `${data.rootfsRepoCount ?? 0}`)],
   ];
   node.innerHTML = rows.map(([k, v]) => `<div class="summary-row"><span>${k}</span><strong>${escapeHTML(v)}</strong></div>`).join("");
 }
@@ -2069,24 +2305,24 @@ function renderBackendDiagnostics() {
   const data = state.status || {};
   if (node) {
     const rows = [
-      ["状态", backendText(data.backend)],
-      ["当前核心", data.coreVersion || "未知"],
-      ["适配核心", data.supportedCoreVersion || "-"],
-      ["socketd", data.socketdEnabled ? "启用" : "禁用"],
-      ["兜底来源", data.fallbackSource ? sourceLabel(data.fallbackSource) : "-"],
-      ["工作区", data.workspace || "-"],
+      [uiText("状态", "Status"), backendText(data.backend)],
+      [uiText("当前核心", "Current Core"), data.coreVersion || uiText("未知", "Unknown")],
+      [uiText("适配核心", "Supported Core"), data.supportedCoreVersion || "-"],
+      ["socketd", data.socketdEnabled ? uiText("启用", "Enabled") : uiText("禁用", "Disabled")],
+      [uiText("兜底来源", "Fallback Source"), data.fallbackSource ? sourceLabel(data.fallbackSource) : "-"],
+      [uiText("工作区", "Workspace"), data.workspace || "-"],
       ["Droidspaces", data.droidspacesPath || "-"],
-      ["最近错误", data.backendError || data.fallbackError || state.backendErrorLog[0]?.message || "-"],
-      ["处理建议", data.backendErrorHint || state.backendErrorLog[0]?.hint || "-"],
+      [uiText("最近错误", "Latest Error"), data.backendError || data.fallbackError || state.backendErrorLog[0]?.message || "-"],
+      [uiText("处理建议", "Suggested Action"), data.backendErrorHint || state.backendErrorLog[0]?.hint || "-"],
     ];
     node.innerHTML = rows.map(([k, v]) => `<div class="summary-row"><span>${k}</span><strong>${escapeHTML(v)}</strong></div>`).join("");
   }
   if (log) {
     if (!state.backendErrorLog.length) {
-      log.textContent = "暂无后端错误";
+      log.textContent = uiText("暂无后端错误", "No backend errors");
     } else {
       log.textContent = state.backendErrorLog
-        .map((item) => `[${fmtTime(item.time)}] ${item.source}: ${item.message}${item.hint ? `\n  建议: ${item.hint}` : ""}`)
+        .map((item) => `[${fmtTime(item.time)}] ${item.source}: ${item.message}${item.hint ? uiText(`\n  建议: ${item.hint}`, `\n  Suggested action: ${item.hint}`) : ""}`)
         .join("\n");
     }
   }
@@ -2098,30 +2334,34 @@ function renderHost() {
   const pathList = $("#hostPathList");
   const host = state.host || {};
   const cpuCores = metricNumber(host.numCPU);
-  const cpuCoresText = cpuCores !== null && cpuCores > 0 ? `${fmtCompactNumber(cpuCores, 0)} 核` : "未上报";
+  const cpuCoresText = cpuCores !== null && cpuCores > 0
+    ? uiText(`${fmtCompactNumber(cpuCores, 0)} 核`, `${fmtCompactNumber(cpuCores, 0)} cores`)
+    : uiText("未上报", "Awaiting data");
   if (summary) {
     if (host.error) {
       summary.innerHTML = `<div class="empty-state">${escapeHTML(host.error)}</div>`;
     } else {
       summary.innerHTML = [
-        ["当前核心", state.status?.coreVersion || "未知"],
-        ["适配核心", state.status?.supportedCoreVersion || "-"],
-        ["系统", `${host.goos || "-"}/${host.goarch || "-"}`],
+        [uiText("当前核心", "Current Core"), state.status?.coreVersion || uiText("未知", "Unknown")],
+        [uiText("适配核心", "Supported Core"), state.status?.supportedCoreVersion || "-"],
+        [uiText("系统", "System"), `${host.goos || "-"}/${host.goarch || "-"}`],
         ["Go", host.goVersion || "-"],
-        ["CPU 核心", cpuCoresText],
-        ["更新时间", fmtTime(host.time)],
+        [uiText("CPU 核心", "CPU Cores"), cpuCoresText],
+        [uiText("更新时间", "Updated"), fmtTime(host.time)],
       ].map(([k, v]) => `<div class="summary-row"><span>${k}</span><strong>${escapeHTML(v)}</strong></div>`).join("");
     }
   }
   if (!pathList) return;
   const paths = safeArray(host.paths);
   if (!paths.length) {
-    pathList.innerHTML = `<div class="empty-state">暂无主机路径信息</div>`;
+    pathList.innerHTML = `<div class="empty-state">${uiText("暂无主机路径信息", "No host path information")}</div>`;
     return;
   }
   pathList.innerHTML = paths.map((item) => {
-    const free = item.diskAvailable ? `${fmtDisk(item.diskAvailable)} 可用 / ${fmtDisk(item.diskTotal)} 总计` : "容量未知";
-    return `<div class="path-item"><div><strong>${escapeHTML(item.key)}</strong><span class="mono">${escapeHTML(item.path || "-")}</span></div><div><span class="badge ${item.exists ? "running" : "stopped"}">${item.exists ? "存在" : "不可用"}</span><span class="muted">${escapeHTML(free)}</span>${item.error ? `<span class="task-error">${escapeHTML(item.error)}</span>` : ""}</div></div>`;
+    const free = item.diskAvailable
+      ? uiText(`${fmtDisk(item.diskAvailable)} 可用 / ${fmtDisk(item.diskTotal)} 总计`, `${fmtDisk(item.diskAvailable)} available / ${fmtDisk(item.diskTotal)} total`)
+      : uiText("容量未知", "Capacity unknown");
+    return `<div class="path-item"><div><strong>${escapeHTML(item.key)}</strong><span class="mono">${escapeHTML(item.path || "-")}</span></div><div><span class="badge ${item.exists ? "running" : "stopped"}">${item.exists ? uiText("存在", "Available") : uiText("不可用", "Unavailable")}</span><span class="muted">${escapeHTML(free)}</span>${item.error ? `<span class="task-error">${escapeHTML(item.error)}</span>` : ""}</div></div>`;
   }).join("");
 }
 
@@ -2133,55 +2373,55 @@ function renderContainers() {
   const rows = filteredContainers(filter);
   const hint = $("#containerListHint");
   if (hint) {
-    const labels = { all: "全部容器", running: "运行中", stopped: "未启动" };
-    hint.textContent = `${labels[state.containerFilter] || "全部容器"} · ${rows.length} 个`;
+    const labels = { all: uiText("全部容器", "All containers"), running: uiText("运行中", "Running"), stopped: uiText("未启动", "Not started") };
+    hint.textContent = uiText(`${labels[state.containerFilter] || labels.all} · ${rows.length} 个`, `${labels[state.containerFilter] || labels.all} · ${rows.length}`);
   }
   if (rows.length === 0) {
-    wrap.innerHTML = `<div class="empty-state">无匹配容器</div>`;
+    wrap.innerHTML = `<div class="empty-state">${uiText("无匹配容器", "No matching containers")}</div>`;
     return;
   }
   wrap.innerHTML = rows.map((container) => {
     const encoded = encodeURIComponent(container.name);
     const operation = containerTaskForName(container.name);
     const operationDisabled = operation ? " disabled" : "";
-    const operationTitle = operation ? ` title="${escapeHTML(`正在${containerOperationLabel(operation.action)}容器`)}"` : "";
+    const operationTitle = operation ? ` title="${escapeHTML(uiText(`正在${containerOperationLabel(operation.action)}容器`, `${containerOperationLabel(operation.action)} container in progress`))}"` : "";
     const action = container.running
-      ? `<button class="mini-action danger" data-action="stop" data-name="${encoded}"${operationDisabled}${operationTitle}>停止</button>`
-      : `<button class="mini-action primary" data-action="start" data-name="${encoded}"${operationDisabled}${operationTitle}>启动</button>`;
+      ? `<button class="mini-action danger" data-action="stop" data-name="${encoded}"${operationDisabled}${operationTitle}>${uiText("停止", "Stop")}</button>`
+      : `<button class="mini-action primary" data-action="start" data-name="${encoded}"${operationDisabled}${operationTitle}>${uiText("启动", "Start")}</button>`;
     const meta = [
       ["PID", container.pid || "-"],
-      ["网络", container.netMode || "-"],
+      [uiText("网络", "Network"), container.netMode || "-"],
     ];
     if (container.netMode === "nat") {
       meta.push(["NAT/IP", container.natIp || "-"]);
-      if (compactPortText(container)) meta.push(["端口", compactPortText(container)]);
+      if (compactPortText(container)) meta.push([uiText("端口", "Ports"), compactPortText(container)]);
     }
     meta.push(["CPU", containerCpuText(container)], [containerMemoryLabel(container), containerMemoryText(container)]);
-    if (container.diskUsage || container.useSparseImage) meta.push(["磁盘占用", containerDiskText(container)]);
+    if (container.diskUsage || container.useSparseImage) meta.push([uiText("磁盘占用", "Disk Usage"), containerDiskText(container)]);
     return `<article class="container-card" data-name="${encoded}">
       <div class="container-card-head">
         <div class="container-title-block"><div class="container-title-line">${containerDistroIcon(container, "container-distro-icon")}<strong>${escapeHTML(container.name)}</strong>${statusBadge(container)}</div><span>${escapeHTML(container.distroName || container.hostname || container.uuid || "-")}</span></div>
-        <button class="mini-action" data-action="inspect" data-name="${encoded}">详情</button>
+        <button class="mini-action" data-action="inspect" data-name="${encoded}">${uiText("详情", "Details")}</button>
       </div>
       <div class="container-info-grid">
         ${meta.map(([label, value, html]) => `<div class="container-info"><span>${escapeHTML(label)}</span><strong class="mono">${html || escapeHTML(value)}</strong></div>`).join("")}
       </div>
-      <div class="container-card-actions">${action}<button class="mini-action" data-action="restart" data-name="${encoded}"${operationDisabled}${operationTitle}>重启</button><button class="mini-action" data-action="config" data-name="${encoded}">编辑</button><button class="mini-action" data-action="terminal" data-name="${encoded}">终端</button><button class="mini-action" data-action="export" data-name="${encoded}">备份</button><button class="mini-action" data-action="template" data-name="${encoded}">转换为模板</button><button class="mini-action danger" data-action="delete" data-name="${encoded}"${operationDisabled}${operationTitle}>删除</button></div>
+      <div class="container-card-actions">${action}<button class="mini-action" data-action="restart" data-name="${encoded}"${operationDisabled}${operationTitle}>${uiText("重启", "Restart")}</button><button class="mini-action" data-action="config" data-name="${encoded}">${uiText("编辑", "Edit")}</button><button class="mini-action" data-action="terminal" data-name="${encoded}">${uiText("终端", "Terminal")}</button><button class="mini-action" data-action="export" data-name="${encoded}">${uiText("备份", "Back up")}</button><button class="mini-action" data-action="template" data-name="${encoded}">${uiText("转换为模板", "Convert to template")}</button><button class="mini-action danger" data-action="delete" data-name="${encoded}"${operationDisabled}${operationTitle}>${uiText("删除", "Delete")}</button></div>
     </article>`;
   }).join("");
 }
 
 function containerOverviewNetworkText(container) {
   const mode = String(container?.netMode || "").toLowerCase();
-  if (mode === "nat") return `NAT${container.natIp ? ` · ${container.natIp}` : " · 自动分配"}`;
-  if (mode === "host") return "主机网络";
-  if (mode === "gateway") return "网关网络";
-  if (mode === "none") return "无网络";
-  return mode ? `${mode} 网络` : "网络未上报";
+  if (mode === "nat") return `NAT${container.natIp ? ` · ${container.natIp}` : uiText(" · 自动分配", " · automatic")}`;
+  if (mode === "host") return uiText("主机网络", "Host network");
+  if (mode === "gateway") return uiText("网关网络", "Gateway network");
+  if (mode === "none") return uiText("无网络", "No network");
+  return mode ? uiText(`${mode} 网络`, `${mode} network`) : uiText("网络未上报", "Network unavailable");
 }
 
 function containerOverviewResourceText(container) {
-  if (!container?.running) return `磁盘 ${containerDiskText(container)}`;
+  if (!container?.running) return uiText(`磁盘 ${containerDiskText(container)}`, `Disk ${containerDiskText(container)}`);
   return `CPU ${containerCpuText(container)} · ${containerMemoryLabel(container)} ${containerMemoryText(container)}`;
 }
 
@@ -2190,9 +2430,9 @@ function renderOverviewContainers() {
   if (!node) return;
   const containers = safeArray(state.containers)
     .slice()
-    .sort((a, b) => Number(Boolean(b.running)) - Number(Boolean(a.running)) || String(a.name || "").localeCompare(String(b.name || "")));
+    .sort((a, b) => Number(Boolean(b.running)) - Number(Boolean(a.running)) || String(a.name || "").localeCompare(String(b.name || ""), uiLocale()));
   if (!containers.length) {
-    node.innerHTML = `<div class="empty-state">暂无容器</div>`;
+    node.innerHTML = `<div class="empty-state">${uiText("暂无容器", "No containers")}</div>`;
     return;
   }
   const visible = containers.slice(0, 4);
@@ -2203,8 +2443,8 @@ function renderOverviewContainers() {
       ? ` data-container-runtime-seconds="${runtime.seconds}" data-container-runtime-sampled-at="${Date.now()}"`
       : "";
     const encodedName = encodeURIComponent(container.name || "");
-    const stateText = running ? "运行中" : "已停止";
-    const timeText = running ? runtime.text : "未启动";
+    const stateText = running ? uiText("运行中", "Running") : uiText("已停止", "Stopped");
+    const timeText = running ? runtime.text : uiText("未启动", "Not started");
     return `<button class="overview-container-row ${running ? "running" : "stopped"}" type="button" data-action="inspect" data-name="${encodedName}">
       ${containerDistroIcon(container, "overview-distro-icon")}
       <span class="overview-container-name"><strong>${escapeHTML(container.name || "-")}</strong><small>${escapeHTML(containerOverviewNetworkText(container))}</small></span>
@@ -2235,7 +2475,7 @@ async function inspect(name, showToast = true, navigate = true) {
   renderSecurity();
   if (navigate) switchView("detail");
   ensureDetailLiveData(data.name || name);
-  if (showToast) toast("已加载详细参数");
+  if (showToast) toast(uiText("已加载详细参数", "Details loaded"));
 }
 
 function restoreDetailLiveData(name) {
@@ -2279,63 +2519,63 @@ function detailHTMLCard(title, html, options = {}) {
 
 function renderDetail(data) {
   const distroName = data.distroName || containerDistroInfo(data).label;
-  $("#detailTitle").textContent = data.name || state.selected || "详细参数";
-  $("#detailSubtitle").textContent = [distroName, data.running ? `已启动 · ${containerUptimeText(data)}` : "已停止", data.source ? sourceLabel(data.source) : ""].filter(Boolean).join(" · ");
+  $("#detailTitle").textContent = data.name || state.selected || uiText("详细参数", "Details");
+  $("#detailSubtitle").textContent = [distroName, data.running ? uiText(`已启动 · ${containerUptimeText(data)}`, `Running · ${containerUptimeText(data)}`) : uiText("已停止", "Stopped"), data.source ? sourceLabel(data.source) : ""].filter(Boolean).join(" · ");
   const body = $("#detailBody");
   const flags = [
-    ["前台", data.foreground],
-    ["易失", data.volatileMode],
+    [uiText("前台", "Foreground"), data.foreground],
+    [uiText("易失", "Volatile"), data.volatileMode],
     ["cgroup v1", data.forceCgroupV1],
-    ["禁用 IPv6", data.disableIPv6],
-    ...(supportsAndroidStorage() ? [["Android 存储", data.androidStorage]] : []),
-    ["SELinux 宽容", data.selinuxPermissive],
-    ["用户命名空间", data.allowUserns],
-    ["硬件访问", data.hwAccess],
+    [uiText("禁用 IPv6", "Disable IPv6"), data.disableIPv6],
+    ...(supportsAndroidStorage() ? [[uiText("Android 存储", "Android Storage"), data.androidStorage]] : []),
+    [uiText("SELinux 宽容", "SELinux Permissive"), data.selinuxPermissive],
+    [uiText("用户命名空间", "User Namespaces"), data.allowUserns],
+    [uiText("硬件访问", "Hardware Access"), data.hwAccess],
     ["GPU", data.gpuMode],
     ["Termux X11", data.termuxX11],
-    ["阻止嵌套 NS", data.blockNestedNamespaces],
-    ["开机启动", data.runAtBoot],
-    ["镜像挂载", data.isImageMount],
+    [uiText("阻止嵌套 NS", "Block Nested Namespaces"), data.blockNestedNamespaces],
+    [uiText("开机启动", "Start at Boot"), data.runAtBoot],
+    [uiText("镜像挂载", "Image Mount"), data.isImageMount],
   ];
   const envRows = safeArray(data.env)
     .filter((env) => detailHasValue(env.key) || detailHasValue(env.value))
-    .map((env) => `<div class="kv"><span>${escapeHTML(env.key || "变量")}</span><span class="mono">${escapeHTML(env.value || "")}</span></div>`)
+    .map((env) => `<div class="kv"><span>${escapeHTML(env.key || uiText("变量", "Variable"))}</span><span class="mono">${escapeHTML(env.value || "")}</span></div>`)
     .join("");
   const binds = safeArray(data.binds)
     .filter((bind) => detailHasValue(bind.source) || detailHasValue(bind.destination))
-    .map((bind) => `<div class="kv"><span>${bind.readOnly ? "只读" : "读写"}</span><span class="mono">${escapeHTML(bind.source || "")} → ${escapeHTML(bind.destination || "")}</span></div>`)
+    .map((bind) => `<div class="kv"><span>${bind.readOnly ? uiText("只读", "Read-only") : uiText("读写", "Read-write")}</span><span class="mono">${escapeHTML(bind.source || "")} → ${escapeHTML(bind.destination || "")}</span></div>`)
     .join("");
   const networkRows = [
-    ["模式", data.netMode],
-    ...(data.netMode === "nat" ? [["NAT/IP", data.natIp || data.staticNatIp], ["端口", safeArray(data.ports).length ? portText(data.ports) : ""]] : []),
+    [uiText("模式", "Mode"), data.netMode],
+    ...(data.netMode === "nat" ? [["NAT/IP", data.natIp || data.staticNatIp], [uiText("端口", "Ports"), safeArray(data.ports).length ? portText(data.ports) : ""]] : []),
     ["DNS", data.dnsServers],
   ];
   const enabledFlags = flags.filter(([, value]) => Boolean(value));
-  const flagRows = enabledFlags.map(([label]) => `<div class="flag on"><span>${label}</span><strong>开</strong></div>`).join("");
+  const flagRows = enabledFlags.map(([label]) => `<div class="flag on"><span>${label}</span><strong>${uiText("开", "On")}</strong></div>`).join("");
   const summaryCards = [
-    detailCard("概览", [["系统", distroName], ["状态", data.running ? "已启动" : "已停止"], ["运行时间", data.running ? containerUptimeText(data) : ""], ["PID", data.running ? data.pid : ""], ["UUID", data.uuid], ["主机名", data.hostname], ["启动时间", data.running && data.startedAt ? fmtTime(data.startedAt) : ""], ["开机启动", data.runAtBoot ? "启用" : ""], ["启动顺序", data.runAtBootPriority || ""], ["来源", data.source ? sourceLabel(data.source) : ""]]),
-    detailCard("网络", networkRows),
-    detailCard("资源", [[containerMemoryLabel(data), containerMemoryText(data)], ...containerCgroupMemoryRows(data), ["内存限制", data.memoryLimitText || (data.memoryLimit ? fmtBytes(data.memoryLimit) : "")], ["磁盘占用", containerDiskText(data)], ["CPU", data.cpusText || (data.cpuQuota ? `${data.cpuQuota}/${data.cpuPeriod || "默认"}` : "")], ["PIDs", data.pidsLimit || data.configValues?.pids_limit]]),
-    detailCard("镜像", [["路径", data.rootfsPath], ["镜像", data.imageRef], ["Init", data.customInit]]),
-    detailHTMLCard("绑定挂载", binds, { wide: true }),
-    detailHTMLCard("环境变量", envRows, { wide: true }),
-    detailHTMLCard("运行标志", flagRows ? `<div class="flag-grid">${flagRows}</div>` : "", { wide: true }),
-    detailCard("图形参数", [["X11 参数", data.tx11ExtraFlags || data.tx11_extra_flags || data.configValues?.tx11_extra_flags], ["VirGL 参数", data.virglExtraFlags || data.virgl_extra_flags || data.configValues?.virgl_extra_flags]], { wide: true }),
+    detailCard(uiText("概览", "Overview"), [[uiText("系统", "System"), distroName], [uiText("状态", "Status"), data.running ? uiText("已启动", "Running") : uiText("已停止", "Stopped")], [uiText("运行时间", "Uptime"), data.running ? containerUptimeText(data) : ""], ["PID", data.running ? data.pid : ""], ["UUID", data.uuid], [uiText("主机名", "Hostname"), data.hostname], [uiText("启动时间", "Started"), data.running && data.startedAt ? fmtTime(data.startedAt) : ""], [uiText("开机启动", "Start at Boot"), data.runAtBoot ? uiText("启用", "Enabled") : ""], [uiText("启动顺序", "Startup Order"), data.runAtBootPriority || ""], [uiText("来源", "Source"), data.source ? sourceLabel(data.source) : ""]]),
+    detailCard(uiText("网络", "Network"), networkRows),
+    detailCard(uiText("资源", "Resources"), [[containerMemoryLabel(data), containerMemoryText(data)], ...containerCgroupMemoryRows(data), [uiText("内存限制", "Memory Limit"), data.memoryLimitText || (data.memoryLimit ? fmtBytes(data.memoryLimit) : "")], [uiText("磁盘占用", "Disk Usage"), containerDiskText(data)], ["CPU", data.cpusText || (data.cpuQuota ? `${data.cpuQuota}/${data.cpuPeriod || uiText("默认", "default")}` : "")], ["PIDs", data.pidsLimit || data.configValues?.pids_limit]]),
+    detailCard(uiText("镜像", "Image"), [[uiText("路径", "Path"), data.rootfsPath], [uiText("镜像", "Image"), data.imageRef], ["Init", data.customInit]]),
+    detailHTMLCard(uiText("绑定挂载", "Bind Mounts"), binds, { wide: true }),
+    detailHTMLCard(uiText("环境变量", "Environment Variables"), envRows, { wide: true }),
+    detailHTMLCard(uiText("运行标志", "Runtime Flags"), flagRows ? `<div class="flag-grid">${flagRows}</div>` : "", { wide: true }),
+    detailCard(uiText("图形参数", "Graphics"), [[uiText("X11 参数", "X11 Arguments"), data.tx11ExtraFlags || data.tx11_extra_flags || data.configValues?.tx11_extra_flags], [uiText("VirGL 参数", "VirGL Arguments"), data.virglExtraFlags || data.virgl_extra_flags || data.configValues?.virgl_extra_flags]], { wide: true }),
   ].join("");
   const rootfsAction = data.isImageMount || String(data.rootfsPath || "").toLowerCase().endsWith(".img")
-    ? `<button class="text-btn" data-sparse-action="resize" data-name="${encodeURIComponent(data.name || state.selected)}">调整大小</button>`
-    : `<button class="text-btn" data-sparse-action="migrate" data-name="${encodeURIComponent(data.name || state.selected)}">迁移为镜像</button>`;
+    ? `<button class="text-btn" data-sparse-action="resize" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("调整大小", "Resize")}</button>`
+    : `<button class="text-btn" data-sparse-action="migrate" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("迁移为镜像", "Migrate to Image")}</button>`;
   const detailOperation = containerTaskForName(data.name || state.selected);
   const detailDeleteDisabled = detailOperation ? " disabled" : "";
-  const detailDeleteTitle = detailOperation ? ` title="${escapeHTML(`正在${containerOperationLabel(detailOperation.action)}容器`)}"` : "";
-  body.innerHTML = `<div class="entity-head"><div>${containerDistroIcon(data, "detail-distro-icon")}<span class="state-dot ${data.running ? "running" : ""}"></span><strong>${escapeHTML(data.name || "-")}</strong></div><div class="row-actions"><button class="text-btn" data-action="terminal" data-name="${encodeURIComponent(data.name || state.selected)}">终端</button><button class="text-btn" data-action="config" data-name="${encodeURIComponent(data.name || state.selected)}">编辑</button><button class="text-btn" data-action="export" data-name="${encodeURIComponent(data.name || state.selected)}">备份</button><button class="text-btn" data-action="template" data-name="${encodeURIComponent(data.name || state.selected)}">转换为模板</button></div></div>
-    <div class="detail-tabs" role="tablist" aria-label="容器详情功能"><button class="segmented-option" type="button" data-detail-tab="summary">摘要</button><button class="segmented-option" type="button" data-detail-tab="users">用户</button><button class="segmented-option" type="button" data-detail-tab="services">服务</button><button class="segmented-option" type="button" data-detail-tab="image">镜像</button><button class="segmented-option" type="button" data-detail-tab="diagnostics">诊断</button><button class="segmented-option danger-tab" type="button" data-detail-tab="danger">危险</button></div>
-    <div id="detailSummaryPanel" class="detail-tab-panel"><div class="detail-grid">${summaryCards || `<section class="detail-card wide"><div class="empty-state">暂无详细参数</div></section>`}</div></div>
-    <div id="detailUsersPanel" class="detail-tab-panel"><section class="detail-card wide compact-detail-card"><div class="section-line"><h3>用户列表</h3><button class="text-btn" data-detail-load="users" data-name="${encodeURIComponent(data.name || state.selected)}">刷新</button></div><div id="detailUsers" class="user-grid"><div class="empty-state">加载中</div></div></section></div>
-    <div id="detailServicesPanel" class="detail-tab-panel"><section class="detail-card wide compact-detail-card"><div class="section-line"><h3>服务管理</h3><button class="text-btn" data-detail-load="services" data-name="${encodeURIComponent(data.name || state.selected)}">刷新</button></div><div class="service-tools"><input id="detailServiceSearch" type="search" value="${escapeHTML(state.serviceSearch)}" placeholder="搜索服务..." autocomplete="off" /><div id="detailServiceFilters" class="service-filter-row" role="tablist" aria-label="服务状态筛选"></div></div><div id="detailServices" class="service-list"><div class="empty-state">加载中</div></div><div id="detailSystemdUnit" class="hidden"></div><pre id="detailServiceOutput" class="mini-output service-output">等待操作</pre></section></div>
-    <div id="detailImagePanel" class="detail-tab-panel"><section class="detail-card wide"><h3>rootfs.img</h3><div class="row-actions">${rootfsAction}</div><pre id="detailSparseOutput" class="mini-output">等待操作</pre></section></div>
-    <div id="detailDiagnosticsPanel" class="detail-tab-panel"><section class="detail-card wide"><h3>诊断设置</h3><div class="row-actions"><button class="text-btn" data-network-diagnose="${encodeURIComponent(data.name || state.selected)}">网络诊断</button><button class="text-btn" data-detail-load="diagnostics" data-name="${encodeURIComponent(data.name || state.selected)}">打开设置</button><button class="text-btn" data-diagnostics-action="requirements">Requirements</button><button class="text-btn" data-diagnostics-action="bugreport">Bugreport</button></div><div id="detailDiagnosticsOutput" class="mini-output diagnostics-output">等待执行</div></section>${data.rawOutput ? `<section class="detail-card wide"><h3>原始 CLI</h3><pre class="mini-output">${escapeHTML(data.rawOutput)}</pre></section>` : ""}</div>
-    <div id="detailDangerPanel" class="detail-tab-panel"><section class="detail-card wide danger-zone"><h3>危险操作</h3><p class="muted">删除会移除容器目录及其数据。</p><button class="text-btn danger" data-action="delete" data-name="${encodeURIComponent(data.name || state.selected)}"${detailDeleteDisabled}${detailDeleteTitle}>删除容器</button></section></div>`;
+  const detailDeleteTitle = detailOperation ? ` title="${escapeHTML(uiText(`正在${containerOperationLabel(detailOperation.action)}容器`, `${containerOperationLabel(detailOperation.action)} container in progress`))}"` : "";
+  body.innerHTML = `<div class="entity-head"><div>${containerDistroIcon(data, "detail-distro-icon")}<span class="state-dot ${data.running ? "running" : ""}"></span><strong>${escapeHTML(data.name || "-")}</strong></div><div class="row-actions"><button class="text-btn" data-action="terminal" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("终端", "Terminal")}</button><button class="text-btn" data-action="config" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("编辑", "Edit")}</button><button class="text-btn" data-action="export" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("备份", "Back up")}</button><button class="text-btn" data-action="template" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("转换为模板", "Convert to template")}</button></div></div>
+    <div class="detail-tabs" role="tablist" aria-label="${uiText("容器详情功能", "Container detail tools")}"><button class="segmented-option" type="button" data-detail-tab="summary">${uiText("摘要", "Summary")}</button><button class="segmented-option" type="button" data-detail-tab="users">${uiText("用户", "Users")}</button><button class="segmented-option" type="button" data-detail-tab="services">${uiText("服务", "Services")}</button><button class="segmented-option" type="button" data-detail-tab="image">${uiText("镜像", "Image")}</button><button class="segmented-option" type="button" data-detail-tab="diagnostics">${uiText("诊断", "Diagnostics")}</button><button class="segmented-option danger-tab" type="button" data-detail-tab="danger">${uiText("危险", "Danger")}</button></div>
+    <div id="detailSummaryPanel" class="detail-tab-panel"><div class="detail-grid">${summaryCards || `<section class="detail-card wide"><div class="empty-state">${uiText("暂无详细参数", "No detail information")}</div></section>`}</div></div>
+    <div id="detailUsersPanel" class="detail-tab-panel"><section class="detail-card wide compact-detail-card"><div class="section-line"><h3>${uiText("用户列表", "Users")}</h3><button class="text-btn" data-detail-load="users" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("刷新", "Refresh")}</button></div><div id="detailUsers" class="user-grid"><div class="empty-state">${uiText("加载中", "Loading")}</div></div></section></div>
+    <div id="detailServicesPanel" class="detail-tab-panel"><section class="detail-card wide compact-detail-card"><div class="section-line"><h3>${uiText("服务管理", "Service Management")}</h3><button class="text-btn" data-detail-load="services" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("刷新", "Refresh")}</button></div><div class="service-tools"><input id="detailServiceSearch" type="search" value="${escapeHTML(state.serviceSearch)}" placeholder="${uiText("搜索服务...", "Search services...")}" autocomplete="off" /><div id="detailServiceFilters" class="service-filter-row" role="tablist" aria-label="${uiText("服务状态筛选", "Service status filter")}"></div></div><div id="detailServices" class="service-list"><div class="empty-state">${uiText("加载中", "Loading")}</div></div><div id="detailSystemdUnit" class="hidden"></div><pre id="detailServiceOutput" class="mini-output service-output">${uiText("等待操作", "Waiting for an action")}</pre></section></div>
+    <div id="detailImagePanel" class="detail-tab-panel"><section class="detail-card wide"><h3>rootfs.img</h3><div class="row-actions">${rootfsAction}</div><pre id="detailSparseOutput" class="mini-output">${uiText("等待操作", "Waiting for an action")}</pre></section></div>
+    <div id="detailDiagnosticsPanel" class="detail-tab-panel"><section class="detail-card wide"><h3>${uiText("诊断设置", "Diagnostic Settings")}</h3><div class="row-actions"><button class="text-btn" data-network-diagnose="${encodeURIComponent(data.name || state.selected)}">${uiText("网络诊断", "Network Diagnostics")}</button><button class="text-btn" data-detail-load="diagnostics" data-name="${encodeURIComponent(data.name || state.selected)}">${uiText("打开设置", "Open Settings")}</button><button class="text-btn" data-diagnostics-action="requirements">Requirements</button><button class="text-btn" data-diagnostics-action="bugreport">Bugreport</button></div><div id="detailDiagnosticsOutput" class="mini-output diagnostics-output">${uiText("等待执行", "Waiting to run")}</div></section>${data.rawOutput ? `<section class="detail-card wide"><h3>${uiText("原始 CLI", "Raw CLI")}</h3><pre class="mini-output">${escapeHTML(data.rawOutput)}</pre></section>` : ""}</div>
+    <div id="detailDangerPanel" class="detail-tab-panel"><section class="detail-card wide danger-zone"><h3>${uiText("危险操作", "Danger Zone")}</h3><p class="muted">${uiText("删除会移除容器目录及其数据。", "Deletion removes the container directory and its data.")}</p><button class="text-btn danger" data-action="delete" data-name="${encodeURIComponent(data.name || state.selected)}"${detailDeleteDisabled}${detailDeleteTitle}>${uiText("删除容器", "Delete Container")}</button></section></div>`;
   restoreDetailLiveData(data.name || state.selected);
   switchDetailTab(state.detailTab || "summary");
 }
@@ -2380,11 +2620,11 @@ function renderDetailUsers(name, data) {
   const node = $("#detailUsers");
   if (!node) return;
   const users = withRootUser(normalizeUsers(data));
-  if (!users.length) { node.innerHTML = `<div class="empty-state">暂无用户</div>`; return; }
+  if (!users.length) { node.innerHTML = `<div class="empty-state">${uiText("暂无用户", "No users")}</div>`; return; }
   node.innerHTML = users.map((user) => {
     const username = user.name || user.username;
     const meta = [user.uid ? `UID ${user.uid}` : "", user.gid ? `GID ${user.gid}` : "", user.shell || ""].filter(Boolean).join(" · ");
-    return `<div class="user-item"><div><strong>${escapeHTML(username)}</strong>${meta ? `<span>${escapeHTML(meta)}</span>` : ""}</div><button class="text-btn" data-terminal-user="${encodeURIComponent(username)}" data-name="${encodeURIComponent(name)}">进入终端</button></div>`;
+    return `<div class="user-item"><div><strong>${escapeHTML(username)}</strong>${meta ? `<span>${escapeHTML(meta)}</span>` : ""}</div><button class="text-btn" data-terminal-user="${encodeURIComponent(username)}" data-name="${encodeURIComponent(name)}">${uiText("进入终端", "Open Terminal")}</button></div>`;
   }).join("");
 }
 
@@ -2463,16 +2703,32 @@ function filterServicesForDetail(services) {
     const ar = serviceModel(a).isRunning ? 1 : 0;
     const br = serviceModel(b).isRunning ? 1 : 0;
     if (ar !== br) return br - ar;
-    return String(a.name || a.service || "").localeCompare(String(b.name || b.service || ""));
+    return String(a.name || a.service || "").localeCompare(String(b.name || b.service || ""), uiLocale());
   });
 }
 
 function serviceRunLabel(state) {
-  return { running: "运行中", stopped: "已停止", failed: "失败", starting: "启动中", stopping: "停止中", unknown: "运行未知" }[state] || state;
+  return {
+    running: uiText("运行中", "Running"),
+    stopped: uiText("已停止", "Stopped"),
+    failed: uiText("失败", "Failed"),
+    starting: uiText("启动中", "Starting"),
+    stopping: uiText("停止中", "Stopping"),
+    unknown: uiText("运行未知", "Unknown state"),
+  }[state] || state;
 }
 
 function serviceEnableLabel(state) {
-  return { enabled: "已启用", disabled: "已禁用", masked: "已屏蔽", static: "静态", indirect: "间接启用", generated: "生成", transient: "临时", unknown: "启用未知" }[state] || state;
+  return {
+    enabled: uiText("已启用", "Enabled"),
+    disabled: uiText("已禁用", "Disabled"),
+    masked: uiText("已屏蔽", "Masked"),
+    static: uiText("静态", "Static"),
+    indirect: uiText("间接启用", "Indirect"),
+    generated: uiText("生成", "Generated"),
+    transient: uiText("临时", "Transient"),
+    unknown: uiText("启用未知", "Enable state unknown"),
+  }[state] || state;
 }
 
 function serviceStateClass(prefix, state) {
@@ -2484,10 +2740,19 @@ function renderServiceFilters(services) {
   const wrap = $("#detailServiceFilters");
   if (!wrap) return;
   const counts = serviceCounts(services);
+  const labels = {
+    running: uiText("运行中", "Running"),
+    enabled: uiText("已启用", "Enabled"),
+    disabled: uiText("已禁用", "Disabled"),
+    abnormal: uiText("异常", "Abnormal"),
+    static: uiText("静态", "Static"),
+    masked: uiText("已屏蔽", "Masked"),
+    all: uiText("全部", "All"),
+  };
   wrap.innerHTML = SERVICE_FILTERS.map(([filter, label]) => {
     const active = !state.serviceSearch.trim() && (state.serviceFilter || "running") === filter;
     const dot = filter === "all" ? "" : `<span class="service-filter-dot service-filter-dot-${filter}"></span>`;
-    return `<button class="service-filter-chip ${active ? "active" : ""}" type="button" data-service-filter="${filter}" aria-pressed="${active ? "true" : "false"}">${dot}${escapeHTML(label)} (${counts[filter] || 0})</button>`;
+    return `<button class="service-filter-chip ${active ? "active" : ""}" type="button" data-service-filter="${filter}" aria-pressed="${active ? "true" : "false"}">${dot}${escapeHTML(labels[filter] || label)} (${counts[filter] || 0})</button>`;
   }).join("");
 }
 
@@ -2498,10 +2763,20 @@ function renderDetailServices(name, data) {
   const search = $("#detailServiceSearch");
   if (search && search.value !== state.serviceSearch) search.value = state.serviceSearch;
   renderServiceFilters(services);
-  if (!services.length) { node.innerHTML = `<div class="empty-state">暂无服务</div>`; return; }
+  if (!services.length) { node.innerHTML = `<div class="empty-state">${uiText("暂无服务", "No services")}</div>`; return; }
   const visibleServices = filterServicesForDetail(services);
   if (!visibleServices.length) {
-    const emptyText = state.serviceSearch.trim() ? "未找到服务" : SERVICE_EMPTY_TEXT[state.serviceFilter || "running"] || "未找到服务";
+    const emptyText = state.serviceSearch.trim()
+      ? uiText("未找到服务", "No services found")
+      : ({
+        running: uiText("没有运行中的服务", "No running services"),
+        enabled: uiText("没有已启用的服务", "No enabled services"),
+        disabled: uiText("没有已禁用的服务", "No disabled services"),
+        abnormal: uiText("没有异常服务", "No abnormal services"),
+        static: uiText("没有静态服务", "No static services"),
+        masked: uiText("没有已屏蔽的服务", "No masked services"),
+        all: uiText("未找到服务", "No services found"),
+      })[state.serviceFilter || "running"] || uiText("未找到服务", "No services found");
     node.innerHTML = `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
     return;
   }
@@ -2512,11 +2787,14 @@ function renderDetailServices(name, data) {
     const filterKey = serviceFilterKey(service);
     const rawState = firstValue(service.state, service.status, "-");
     const rawEnableState = firstValue(service.enableState, service.enabledState, service.unitFileState, service.enabled === true ? "enabled" : service.enabled === false ? "disabled" : "-");
-    const serviceTitle = `运行状态：${rawState} / 启用状态：${rawEnableState}`;
+    const serviceTitle = uiText(`运行状态：${rawState} / 启用状态：${rawEnableState}`, `Run state: ${rawState} / Enable state: ${rawEnableState}`);
     const description = service.description && service.description !== serviceName ? `<span class="service-desc">${escapeHTML(service.description)}</span>` : "";
-    const inspect = manager === "systemd" ? `<button class="mini-action" data-systemd-inspect="1" data-service-name="${escapeHTML(serviceName)}" data-name="${encodeURIComponent(name)}">检查</button>` : "";
-    const actions = inspect + serviceActionsForManager(manager).map((action) => `<button class="mini-action" data-service-action="${action}" data-service-manager="${escapeHTML(manager)}" data-service-name="${escapeHTML(serviceName)}" data-name="${encodeURIComponent(name)}">${escapeHTML({ start: "启动", stop: "停止", restart: "重启", reload: "重载", enable: "启用", disable: "禁用", mask: "Mask", unmask: "Unmask" }[action] || action)}</button>`).join("");
-    return `<div class="service-row service-row-${escapeHTML(filterKey)}"><div class="service-main"><strong>${escapeHTML(serviceName)}</strong><div class="service-badges" title="${escapeHTML(serviceTitle)}"><span class="service-badge service-status-${escapeHTML(filterKey)}">${escapeHTML(SERVICE_FILTERS.find(([key]) => key === filterKey)?.[1] || filterKey)}</span><span class="service-badge ${serviceStateClass("run", runState)}">${escapeHTML(serviceRunLabel(runState))}</span><span class="service-badge ${serviceStateClass("enable", enableState)}">${escapeHTML(serviceEnableLabel(enableState))}</span><span class="mono service-manager">${escapeHTML(manager)}</span></div>${description}</div><div class="service-actions">${actions}</div></div>`;
+    const inspect = manager === "systemd" ? `<button class="mini-action" data-systemd-inspect="1" data-service-name="${escapeHTML(serviceName)}" data-name="${encodeURIComponent(name)}">${uiText("检查", "Inspect")}</button>` : "";
+    const actions = inspect + serviceActionsForManager(manager).map((action) => `<button class="mini-action" data-service-action="${action}" data-service-manager="${escapeHTML(manager)}" data-service-name="${escapeHTML(serviceName)}" data-name="${encodeURIComponent(name)}">${escapeHTML({ start: uiText("启动", "Start"), stop: uiText("停止", "Stop"), restart: uiText("重启", "Restart"), reload: uiText("重载", "Reload"), enable: uiText("启用", "Enable"), disable: uiText("禁用", "Disable"), mask: "Mask", unmask: "Unmask" }[action] || action)}</button>`).join("");
+    const filterLabel = {
+      running: uiText("运行中", "Running"), enabled: uiText("已启用", "Enabled"), disabled: uiText("已禁用", "Disabled"), abnormal: uiText("异常", "Abnormal"), static: uiText("静态", "Static"), masked: uiText("已屏蔽", "Masked"), all: uiText("全部", "All"),
+    }[filterKey] || filterKey;
+    return `<div class="service-row service-row-${escapeHTML(filterKey)}"><div class="service-main"><strong>${escapeHTML(serviceName)}</strong><div class="service-badges" title="${escapeHTML(serviceTitle)}"><span class="service-badge service-status-${escapeHTML(filterKey)}">${escapeHTML(filterLabel)}</span><span class="service-badge ${serviceStateClass("run", runState)}">${escapeHTML(serviceRunLabel(runState))}</span><span class="service-badge ${serviceStateClass("enable", enableState)}">${escapeHTML(serviceEnableLabel(enableState))}</span><span class="mono service-manager">${escapeHTML(manager)}</span></div>${description}</div><div class="service-actions">${actions}</div></div>`;
   }).join("");
 }
 
@@ -2530,19 +2808,19 @@ function renderSystemdUnitInspector() {
     return;
   }
   const properties = Object.entries(selected.inspection?.properties || {}).filter(([, value]) => String(value || "").trim() !== "");
-  const propertyHTML = properties.length ? kvRows(properties) : `<div class="empty-state">没有可用属性</div>`;
-  const deps = safeArray(selected.inspection?.dependencies).map((item) => `<li class="mono">${escapeHTML(item)}</li>`).join("") || `<li class="muted">没有依赖项</li>`;
-  const status = selected.inspection?.statusText || "没有 systemctl status 输出";
+  const propertyHTML = properties.length ? kvRows(properties) : `<div class="empty-state">${uiText("没有可用属性", "No properties available")}</div>`;
+  const deps = safeArray(selected.inspection?.dependencies).map((item) => `<li class="mono">${escapeHTML(item)}</li>`).join("") || `<li class="muted">${uiText("没有依赖项", "No dependencies")}</li>`;
+  const status = selected.inspection?.statusText || uiText("没有 systemctl status 输出", "No systemctl status output");
   const override = selected.override || { exists: false, content: "" };
   node.classList.remove("hidden");
-  node.innerHTML = `<section class="systemd-inspector"><div class="section-line"><div><h3>${escapeHTML(selected.unit)}</h3><p class="muted">systemd 单元检查与 override.conf</p></div><div class="tool-buttons"><button class="icon-btn" type="button" data-systemd-inspect="1" data-service-name="${escapeHTML(selected.unit)}" data-name="${encodeURIComponent(selected.name)}" title="刷新" aria-label="刷新">↻</button><button class="icon-btn" type="button" data-systemd-inspector-close="1" title="关闭" aria-label="关闭">×</button></div></div><div class="systemd-inspector-grid"><section><h4>属性</h4>${propertyHTML}</section><section><h4>依赖</h4><ul class="systemd-dependencies">${deps}</ul></section></div><section class="systemd-status"><h4>systemctl status</h4><pre class="mini-output">${escapeHTML(status)}</pre></section><section class="systemd-override"><div class="section-line"><h4>override.conf</h4><div class="tool-buttons"><button class="text-btn" type="button" data-systemd-override-save="1">保存</button>${override.exists ? `<button class="text-btn danger" type="button" data-systemd-override-delete="1">删除</button>` : ""}</div></div><textarea id="detailSystemdOverride" class="form-textarea" rows="10" spellcheck="false">${escapeHTML(override.content || "")}</textarea></section><pre id="detailSystemdOverrideOutput" class="mini-output service-output">${escapeHTML(selected.overrideOutput || "等待操作")}</pre></section>`;
+  node.innerHTML = `<section class="systemd-inspector"><div class="section-line"><div><h3>${escapeHTML(selected.unit)}</h3><p class="muted">${uiText("systemd 单元检查与 override.conf", "systemd unit inspection and override.conf")}</p></div><div class="tool-buttons"><button class="icon-btn" type="button" data-systemd-inspect="1" data-service-name="${escapeHTML(selected.unit)}" data-name="${encodeURIComponent(selected.name)}" title="${uiText("刷新", "Refresh")}" aria-label="${uiText("刷新", "Refresh")}">↻</button><button class="icon-btn" type="button" data-systemd-inspector-close="1" title="${uiText("关闭", "Close")}" aria-label="${uiText("关闭", "Close")}">×</button></div></div><div class="systemd-inspector-grid"><section><h4>${uiText("属性", "Properties")}</h4>${propertyHTML}</section><section><h4>${uiText("依赖", "Dependencies")}</h4><ul class="systemd-dependencies">${deps}</ul></section></div><section class="systemd-status"><h4>systemctl status</h4><pre class="mini-output">${escapeHTML(status)}</pre></section><section class="systemd-override"><div class="section-line"><h4>override.conf</h4><div class="tool-buttons"><button class="text-btn" type="button" data-systemd-override-save="1">${uiText("保存", "Save")}</button>${override.exists ? `<button class="text-btn danger" type="button" data-systemd-override-delete="1">${uiText("删除", "Delete")}</button>` : ""}</div></div><textarea id="detailSystemdOverride" class="form-textarea" rows="10" spellcheck="false">${escapeHTML(override.content || "")}</textarea></section><pre id="detailSystemdOverrideOutput" class="mini-output service-output">${escapeHTML(selected.overrideOutput || uiText("等待操作", "Waiting for an action"))}</pre></section>`;
 }
 
 async function openSystemdUnitInspector(name, unit) {
   setBusy(true);
   try {
     const [inspection, override] = await Promise.all([fetchSystemdUnitInspection(name, unit), fetchSystemdOverride(name, unit)]);
-    state.systemdUnit = { name, unit, inspection, override, overrideOutput: "等待操作" };
+    state.systemdUnit = { name, unit, inspection, override, overrideOutput: uiText("等待操作", "Waiting for an action") };
     renderSystemdUnitInspector();
   } catch (err) {
     toast(err.message);
@@ -2554,7 +2832,7 @@ async function openSystemdUnitInspector(name, unit) {
 async function persistSystemdOverride(remove = false) {
   const selected = state.systemdUnit;
   if (!selected) return;
-  if (remove && !confirm(`删除 ${selected.unit} 的 override.conf？`)) return;
+  if (remove && !confirm(uiText(`删除 ${selected.unit} 的 override.conf？`, `Delete override.conf for ${selected.unit}?`))) return;
   setBusy(true);
   try {
     const content = $("#detailSystemdOverride")?.value || "";
@@ -2562,9 +2840,9 @@ async function persistSystemdOverride(remove = false) {
       ? await deleteSystemdOverride(selected.name, selected.unit)
       : await saveSystemdOverride(selected.name, selected.unit, content);
     selected.override = remove ? { exists: false, content: "" } : { exists: true, content };
-    selected.overrideOutput = result.output || (remove ? "override.conf 已删除并重新加载 systemd" : "override.conf 已保存并重新加载 systemd");
+    selected.overrideOutput = result.output || (remove ? uiText("override.conf 已删除并重新加载 systemd", "override.conf deleted and systemd reloaded") : uiText("override.conf 已保存并重新加载 systemd", "override.conf saved and systemd reloaded"));
     renderSystemdUnitInspector();
-    toast(remove ? "override.conf 已删除" : "override.conf 已保存");
+    toast(remove ? uiText("override.conf 已删除", "override.conf deleted") : uiText("override.conf 已保存", "override.conf saved"));
   } catch (err) {
     selected.overrideOutput = err.message;
     renderSystemdUnitInspector();
@@ -2579,10 +2857,10 @@ function renderBootPriorityList() {
   if (!node) return;
   const containers = state.bootPriorityContainers;
   if (!containers.length) {
-    node.innerHTML = `<div class="empty-state">没有启用开机启动的容器</div>`;
+    node.innerHTML = `<div class="empty-state">${t("boot.noContainers")}</div>`;
     return;
   }
-  node.innerHTML = containers.map((container, index) => `<div class="priority-row"><span class="priority-index">${index + 1}</span><div class="priority-main"><strong>${escapeHTML(container.name || "-")}</strong><span class="muted">${escapeHTML(container.hostname || container.netMode || "")}</span></div><div class="priority-actions"><button class="icon-btn" type="button" data-boot-priority-move="up" data-boot-priority-index="${index}" title="上移" aria-label="上移" ${index === 0 ? "disabled" : ""}>↑</button><button class="icon-btn" type="button" data-boot-priority-move="down" data-boot-priority-index="${index}" title="下移" aria-label="下移" ${index === containers.length - 1 ? "disabled" : ""}>↓</button></div></div>`).join("");
+  node.innerHTML = containers.map((container, index) => `<div class="priority-row"><span class="priority-index">${index + 1}</span><div class="priority-main"><strong>${escapeHTML(container.name || "-")}</strong><span class="muted">${escapeHTML(container.hostname || container.netMode || "")}</span></div><div class="priority-actions"><button class="icon-btn" type="button" data-boot-priority-move="up" data-boot-priority-index="${index}" title="${t("boot.moveUp")}" aria-label="${t("boot.moveUp")}" ${index === 0 ? "disabled" : ""}>↑</button><button class="icon-btn" type="button" data-boot-priority-move="down" data-boot-priority-index="${index}" title="${t("boot.moveDown")}" aria-label="${t("boot.moveDown")}" ${index === containers.length - 1 ? "disabled" : ""}>↓</button></div></div>`).join("");
 }
 
 function moveBootPriority(index, direction) {
@@ -2617,7 +2895,7 @@ async function submitBootPriority() {
     renderBootPriorityList();
     hideBootPriorityModal();
     await refreshAll();
-    toast("开机启动顺序已保存");
+    toast(uiText("开机启动顺序已保存", "Boot startup order saved"));
   } catch (err) {
     toast(err.message);
   } finally {
@@ -2646,7 +2924,7 @@ function renderRequirements(data, selector = "#diagnosticsOutput") {
   const node = $(selector) || $("#diagnosticsOutput");
   if (!node) return;
   if (node.tagName === "PRE") { node.textContent = JSON.stringify(data, null, 2); return; }
-  node.innerHTML = `<div class="diagnostics-card"><div class="row-actions"><button class="text-btn" data-copy-text="${escapeHTML(data.termuxSetup || "")}">复制 Termux Setup</button><button class="text-btn" data-copy-text="${escapeHTML(data.nonGKIConfig || "")}">复制 non-GKI</button><button class="text-btn" data-copy-text="${escapeHTML(data.gkiConfig || "")}">复制 GKI</button></div><h3>Termux setup</h3><pre class="mini-output">${escapeHTML(data.termuxSetup || "")}</pre><h3>non-GKI Kernel Config</h3><pre class="mini-output">${escapeHTML(data.nonGKIConfig || "")}</pre><h3>GKI Kernel Config</h3><pre class="mini-output">${escapeHTML(data.gkiConfig || "")}</pre></div>`;
+  node.innerHTML = `<div class="diagnostics-card"><div class="row-actions"><button class="text-btn" data-copy-text="${escapeHTML(data.termuxSetup || "")}">${uiText("复制 Termux Setup", "Copy Termux Setup")}</button><button class="text-btn" data-copy-text="${escapeHTML(data.nonGKIConfig || "")}">${uiText("复制 non-GKI", "Copy non-GKI")}</button><button class="text-btn" data-copy-text="${escapeHTML(data.gkiConfig || "")}">${uiText("复制 GKI", "Copy GKI")}</button></div><h3>Termux setup</h3><pre class="mini-output">${escapeHTML(data.termuxSetup || "")}</pre><h3>non-GKI Kernel Config</h3><pre class="mini-output">${escapeHTML(data.nonGKIConfig || "")}</pre><h3>GKI Kernel Config</h3><pre class="mini-output">${escapeHTML(data.gkiConfig || "")}</pre></div>`;
 }
 
 async function loadDetailUsers(name) {
@@ -2668,9 +2946,9 @@ async function loadDetailDiagnostics() {
 }
 
 async function runContainerNetworkDiagnostics(name) {
-  if (!name) { toast("请先选择容器"); return; }
+  if (!name) { toast(uiText("请先选择容器", "Select a container first")); return; }
   setBusy(true);
-  renderDiagnosticsOutput("网络诊断执行中", "#detailDiagnosticsOutput");
+  renderDiagnosticsOutput(uiText("网络诊断执行中", "Running network diagnostics"), "#detailDiagnosticsOutput");
   try {
     const data = await api(`/api/containers/${encodeURIComponent(name)}/network-diagnose`, { method: "POST", body: JSON.stringify({}) });
     const output = `$ droidspaces --name ${name} run <network-diagnostics>
@@ -2678,7 +2956,7 @@ exit=${data.exitCode}
 
 ${data.output || ""}`;
     renderDiagnosticsOutput(output, "#detailDiagnosticsOutput");
-    toast(data.ok ? "网络诊断通过" : "网络诊断发现问题");
+    toast(data.ok ? uiText("网络诊断通过", "Network diagnostics passed") : uiText("网络诊断发现问题", "Network diagnostics found issues"));
   } catch (err) {
     renderDiagnosticsOutput(err.message, "#detailDiagnosticsOutput");
     toast(err.message);
@@ -2689,7 +2967,7 @@ ${data.output || ""}`;
 
 async function runDiagnosticsAction(action, selector = "#diagnosticsOutput") {
   setBusy(true);
-  renderDiagnosticsOutput("执行中", selector);
+  renderDiagnosticsOutput(uiText("执行中", "Running"), selector);
   try {
     let data;
     if (action === "requirements") {
@@ -2704,7 +2982,7 @@ async function runDiagnosticsAction(action, selector = "#diagnosticsOutput") {
       renderDiagnosticsSettings(data, selector);
     }
     if (data.taskId) { trackTask(data.taskId); openTaskPanel(); }
-    toast(action === "bugreport" ? "Bugreport 已提交" : action === "requirements" ? "Requirements 检查已提交" : "诊断设置已加载");
+    toast(action === "bugreport" ? uiText("Bugreport 已提交", "Bugreport submitted") : action === "requirements" ? uiText("Requirements 检查已提交", "Requirements check submitted") : uiText("诊断设置已加载", "Diagnostic settings loaded"));
   } catch (err) {
     renderDiagnosticsOutput(err.message, selector);
     toast(err.message);
@@ -2715,16 +2993,16 @@ async function runDiagnosticsAction(action, selector = "#diagnosticsOutput") {
 
 async function runSparseAction(name, action) {
   const node = $("#detailSparseOutput");
-  if (action === "migrate" && !confirm(`将 ${name} 迁移为 rootfs.img？运行中容器可能会被后端停止并恢复。`)) return;
-  const sizeGB = action === "resize" ? prompt("新的镜像大小 GB") : "";
+  if (action === "migrate" && !confirm(uiText(`将 ${name} 迁移为 rootfs.img？运行中容器可能会被后端停止并恢复。`, `Migrate ${name} to rootfs.img? A running container may be stopped and restored by the backend.`))) return;
+  const sizeGB = action === "resize" ? prompt(uiText("新的镜像大小 GB", "New image size in GB")) : "";
   if (action === "resize" && (!sizeGB || Number(sizeGB) <= 0)) return;
   setBusy(true);
-  if (node) node.textContent = "执行中";
+  if (node) node.textContent = uiText("执行中", "Running");
   try {
     const data = action === "migrate" ? await migrateSparseImage(name) : await resizeSparseImage(name, sizeGB);
     if (node) node.textContent = JSON.stringify(data, null, 2);
     if (data.taskId) { trackTask(data.taskId); openTaskPanel(); }
-    toast(action === "migrate" ? "迁移任务已提交" : "调整大小任务已提交");
+    toast(action === "migrate" ? uiText("迁移任务已提交", "Migration task submitted") : uiText("调整大小任务已提交", "Resize task submitted"));
   } catch (err) {
     if (node) node.textContent = err.message;
     toast(err.message);
@@ -2735,7 +3013,7 @@ async function runSparseAction(name, action) {
 
 function copyText(value) {
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(value).then(() => toast("已复制"), (err) => toast(err.message));
+    navigator.clipboard.writeText(value).then(() => toast(uiText("已复制", "Copied")), (err) => toast(err.message));
     return;
   }
   const input = document.createElement("textarea");
@@ -2744,7 +3022,7 @@ function copyText(value) {
   input.select();
   document.execCommand("copy");
   input.remove();
-  toast("已复制");
+  toast(uiText("已复制", "Copied"));
 }
 
 function kvRows(rows) {
@@ -2755,7 +3033,7 @@ async function submitContainerOperation(name, action, request, onDone) {
   const target = String(name || "").trim();
   const existing = containerTaskForName(target);
   if (existing) {
-    toast(`${target} 正在${containerOperationLabel(existing.action)}，请等待任务完成`);
+    toast(uiText(`${target} 正在${containerOperationLabel(existing.action)}，请等待任务完成`, `${containerOperationLabel(existing.action)} is already in progress for ${target}. Wait for the task to finish.`));
     return null;
   }
   setContainerTask(target, action);
@@ -2763,7 +3041,7 @@ async function submitContainerOperation(name, action, request, onDone) {
   try {
     const data = await api(request.path, request.options || {});
     const taskId = String(data.taskId || data.task?.id || "").trim();
-    if (!taskId) throw new Error("后端未返回容器后台任务 ID");
+    if (!taskId) throw new Error(uiText("后端未返回容器后台任务 ID", "The backend did not return a container background task ID"));
     const serverTask = data.task && typeof data.task === "object" ? data.task : {};
     const previous = state.tasks[taskId] || {};
     state.tasks[taskId] = {
@@ -2791,17 +3069,16 @@ async function refreshAfterContainerOperation(name, action, task) {
   await Promise.allSettled([loadStatus(), loadContainers(), loadEvents()]);
   if (action === "delete") {
     if (state.selected === name) clearDetail();
-    $("#cliOutput").textContent = task?.path || "已删除";
-    toast(`已删除 ${name}`);
+    $("#cliOutput").textContent = task?.path || uiText("已删除", "Deleted");
+    toast(uiText(`已删除 ${name}`, `Deleted ${name}`));
     return;
   }
   if (state.selected === name) {
     await inspect(name, false, false).catch(() => {});
   }
-  const labels = { start: "启动", stop: "停止", restart: "重启" };
   const output = Array.isArray(task?.log) ? task.log.slice(-80).join("\n") : (task?.output || "");
   if (output) $("#cliOutput").textContent = output;
-  toast(`${labels[action] || action}完成：${name}`);
+  toast(uiText(`${containerOperationLabel(action)}完成：${name}`, `${containerOperationLabel(action)} completed: ${name}`));
 }
 
 async function runLifecycle(name, action) {
@@ -2816,7 +3093,7 @@ async function runLifecycle(name, action) {
       },
       (task) => refreshAfterContainerOperation(name, action, task),
     );
-    if (data) toast(`已开始${containerOperationLabel(action)}：${name}`);
+    if (data) toast(uiText(`已开始${containerOperationLabel(action)}：${name}`, `${containerOperationLabel(action)} started: ${name}`));
   } catch (err) {
     toast(err.message);
   }
@@ -2825,10 +3102,10 @@ async function runLifecycle(name, action) {
 async function deleteContainer(name) {
   const existing = containerTaskForName(name);
   if (existing) {
-    toast(`${name} 正在${containerOperationLabel(existing.action)}，请等待任务完成`);
+    toast(uiText(`${name} 正在${containerOperationLabel(existing.action)}，请等待任务完成`, `${containerOperationLabel(existing.action)} is already in progress for ${name}. Wait for the task to finish.`));
     return;
   }
-  if (!confirm(`删除容器 ${name}？这会删除该容器目录及其中数据。`)) return;
+  if (!confirm(uiText(`删除容器 ${name}？这会删除该容器目录及其中数据。`, `Delete container ${name}? This removes its directory and all data in it.`))) return;
   try {
     const data = await submitContainerOperation(
       name,
@@ -2839,7 +3116,7 @@ async function deleteContainer(name) {
       },
       (task) => refreshAfterContainerOperation(name, "delete", task),
     );
-    if (data) toast(`已开始删除：${name}`);
+    if (data) toast(uiText(`已开始删除：${name}`, `Deletion started: ${name}`));
   } catch (err) {
     toast(err.message);
   }
@@ -2848,9 +3125,9 @@ async function deleteContainer(name) {
 function clearDetail() {
   state.selected = "";
   state.selectedDetail = null;
-  $("#detailTitle").textContent = "详细参数";
-  $("#detailSubtitle").textContent = "从容器列表选择一个容器";
-  $("#detailBody").innerHTML = `<div class="empty-state">尚未选择容器</div>`;
+  $("#detailTitle").textContent = uiText("详细参数", "Details");
+  $("#detailSubtitle").textContent = uiText("从容器列表选择一个容器", "Select a container from the list");
+  $("#detailBody").innerHTML = `<div class="empty-state">${uiText("尚未选择容器", "No container selected")}</div>`;
 }
 
 function setTerminalUser(user) {
@@ -2871,7 +3148,7 @@ function selectTerminal(name, user = "") {
 }
 
 function openTerminalAsUser(name, user) {
-  if (!name) { toast("请先选择容器"); return; }
+  if (!name) { toast(uiText("请先选择容器", "Select a container first")); return; }
   selectTerminal(name, user || "root");
   switchView("terminal");
   connectTerminal();
@@ -2886,7 +3163,7 @@ function renderTerminalUserOptions(name, data) {
   select.innerHTML = users.map((user) => {
     const username = user.name || user.username;
     return `<option value="${escapeHTML(username)}">${escapeHTML(username)}</option>`;
-  }).join("") + `<option value="__manual">手动输入</option>`;
+  }).join("") + `<option value="__manual">${uiText("手动输入", "Manual input")}</option>`;
   if (users.some((user) => (user.name || user.username) === current)) select.value = current;
   else select.value = "__manual";
 }
@@ -2902,7 +3179,7 @@ function renderTerminalTargets() {
   const select = $("#terminalTarget");
   if (!select) return;
   const current = select.value || state.terminalTarget;
-  select.innerHTML = state.containers.map((container) => `<option value="${escapeHTML(container.name)}">${escapeHTML(container.name)}${container.running ? "" : " (停止)"}</option>`).join("");
+  select.innerHTML = state.containers.map((container) => `<option value="${escapeHTML(container.name)}">${escapeHTML(container.name)}${container.running ? "" : uiText(" (停止)", " (stopped)")}</option>`).join("");
   if (state.containers.some((container) => container.name === current)) select.value = current;
   else if (state.containers.length > 0) select.value = state.containers[0].name;
   state.terminalTarget = select.value || "";
@@ -2935,9 +3212,9 @@ function updateTerminalControls() {
   if (target) target.disabled = connected || connecting;
   if (user) user.disabled = connected || connecting;
   if (userSelect) userSelect.disabled = connected || connecting;
-  if (connecting) terminalStatus("连接中");
-  else if (connected) terminalStatus(`已连接 ${state.terminalTarget}`, true);
-  else terminalStatus("未连接");
+  if (connecting) terminalStatus(uiText("连接中", "Connecting"));
+  else if (connected) terminalStatus(uiText(`已连接 ${state.terminalTarget}`, `Connected to ${state.terminalTarget}`), true);
+  else terminalStatus(uiText("未连接", "Disconnected"));
 }
 
 function terminalURL(target, user) {
@@ -3051,28 +3328,28 @@ function sendTerminalInput() {
 
 function connectTerminal() {
   const target = $("#terminalTarget").value;
-  if (!target) { toast("请先选择容器"); return; }
+  if (!target) { toast(uiText("请先选择容器", "Select a container first")); return; }
   const container = state.containers.find((item) => item.name === target);
-  if (container && !container.running) { toast("请先启动容器"); return; }
+  if (container && !container.running) { toast(uiText("请先启动容器", "Start the container first")); return; }
   if (state.terminalSocket) disconnectTerminal();
   const user = $("#terminalUser").value.trim() || "root";
-  resetTerminalBuffer(`连接 ${target} (${user})...\n`);
+  resetTerminalBuffer(uiText(`连接 ${target} (${user})...\n`, `Connecting to ${target} (${user})...\n`));
   state.terminalTarget = target;
   state.terminalConnected = false;
   const socket = new WebSocket(terminalURL(target, user));
   socket.binaryType = "arraybuffer";
   state.terminalSocket = socket;
   updateTerminalControls();
-  socket.onopen = () => { state.terminalConnected = true; appendTerminal("已连接。\n"); updateTerminalControls(); $("#terminalScreen")?.focus(); };
+  socket.onopen = () => { state.terminalConnected = true; appendTerminal(uiText("已连接。\n", "Connected.\n")); updateTerminalControls(); $("#terminalScreen")?.focus(); };
   socket.onmessage = async (event) => {
     if (event.data instanceof Blob) appendTerminal(await event.data.text());
     else if (event.data instanceof ArrayBuffer) appendTerminal(new TextDecoder().decode(event.data));
     else appendTerminal(event.data);
   };
-  socket.onerror = () => toast("终端连接错误");
+  socket.onerror = () => toast(uiText("终端连接错误", "Terminal connection error"));
   socket.onclose = (event) => {
     if (state.terminalSocket === socket) { state.terminalSocket = null; state.terminalConnected = false; }
-    appendTerminal(`\n[连接已关闭${event.reason ? `: ${event.reason}` : ""}]\n`);
+    appendTerminal(uiText(`\n[连接已关闭${event.reason ? `: ${event.reason}` : ""}]\n`, `\n[Connection closed${event.reason ? `: ${event.reason}` : ""}]\n`));
     updateTerminalControls();
   };
 }
@@ -3117,7 +3394,7 @@ async function createContainer(event) {
   const source = document.querySelector('input[name="createSource"]:checked')?.value || "local";
   const cloudAsset = source === "cloud" ? selectedCreateCloudAsset() : null;
   if (source === "cloud" && !cloudAsset?.downloadUrl) {
-    toast("请选择可用的云端镜像");
+    toast(uiText("请选择可用的云端镜像", "Select an available cloud image"));
     return;
   }
   const netMode = $("#createNetMode").value;
@@ -3187,13 +3464,13 @@ async function createContainer(event) {
     trackTask(data.taskId, async () => {
       await refreshAll();
       if (cloudInitPasswordNotice) {
-        toast(`${payload.name} 创建完成。${cloudInitPasswordNotice.username} 的随机密码：${cloudInitPasswordNotice.password}`, 12000);
+        toast(uiText(`${payload.name} 创建完成。${cloudInitPasswordNotice.username} 的随机密码：${cloudInitPasswordNotice.password}`, `${payload.name} created. Random password for ${cloudInitPasswordNotice.username}: ${cloudInitPasswordNotice.password}`), 12000);
       } else {
-        toast(`${payload.name} 创建完成`);
+        toast(uiText(`${payload.name} 创建完成`, `${payload.name} created`));
       }
     });
     openTaskPanel();
-    toast(`已开始创建 ${payload.name}`);
+    toast(uiText(`已开始创建 ${payload.name}`, `Creation started: ${payload.name}`));
   } catch (err) {
     toast(err.message);
   } finally {
@@ -3219,7 +3496,7 @@ function showCreateModal(options = {}) {
   $("#createModal").classList.remove("hidden");
   resetCreateCloudInitFields();
   renderRuntimeVersions();
-  $("#createCloudTask").textContent = "选择镜像后直接创建，后台会下载并继续创建容器。";
+  $("#createCloudTask").textContent = uiText("选择镜像后直接创建，后台会下载并继续创建容器。", "After you select an image, it will download in the background and then create the container.");
   clearCreateTemplateSelection();
   const sourceInput = document.querySelector(`input[name="createSource"][value="${requestedSource}"]`);
   if (sourceInput) sourceInput.checked = true;
@@ -3238,7 +3515,7 @@ function showCreateModal(options = {}) {
       handleCreateTemplateControlChange("local");
       directSelection = true;
     } else {
-      toast("所选本地模板已不存在，请重新选择");
+      toast(uiText("所选本地模板已不存在，请重新选择", "The selected local template no longer exists. Select another template."));
     }
   }
   setCreateTemplateSelectionLocked(directSelection);
@@ -3256,7 +3533,8 @@ function showCreateModal(options = {}) {
 
 function renderRuntimeVersions() {
   const data = state.status || {};
-  const webVersion = data.webVersion || "读取中";
+  const loading = uiText("读取中", "Loading");
+  const webVersion = data.webVersion || loading;
   const headerVersion = $("#webVersionLabel");
   if (headerVersion) {
     headerVersion.textContent = formatWebVersionLabel(webVersion);
@@ -3264,11 +3542,14 @@ function renderRuntimeVersions() {
   }
   const node = $("#createVersionHint");
   if (!node) return;
-  node.textContent = `WebUI: ${webVersion} · 当前核心: ${data.coreVersion || "读取中"} · 适配核心: ${data.supportedCoreVersion || "读取中"}`;
+  node.textContent = uiText(
+    `WebUI: ${webVersion} · 当前核心: ${data.coreVersion || loading} · 适配核心: ${data.supportedCoreVersion || loading}`,
+    `WebUI: ${webVersion} · Current Core: ${data.coreVersion || loading} · Supported Core: ${data.supportedCoreVersion || loading}`,
+  );
 }
 
 function formatWebVersionLabel(rawVersion) {
-  const version = String(rawVersion || "读取中").trim();
+  const version = String(rawVersion || uiText("读取中", "Loading")).trim();
   const buildMatch = version.match(/^(.+?)\+build\.(\d{8})T(\d{6})\d*Z$/);
   if (!buildMatch) return `WebUI ${version}`;
 
@@ -3285,10 +3566,48 @@ function hideCreateModal() {
 
 async function loadSystemSettings(showBusy = true) {
   if (showBusy) setBusy(true);
+  const initialLoad = !state.systemSettingsLoaded;
+  const languageSaveVersion = state.uiLanguageSaveVersion;
+  const languageSaveCompletedVersion = state.uiLanguageSaveCompletedVersion;
+  const settingsWriteVersion = state.settingsWriteVersion;
+  const settingsWriteCompletedVersion = state.settingsWriteCompletedVersion;
   try {
-    const data = await api("/api/settings");
+    const data = (await api("/api/settings")) || {};
+    if (
+      state.uiLanguageSavePending
+      || languageSaveVersion !== state.uiLanguageSaveVersion
+      || languageSaveCompletedVersion !== state.uiLanguageSaveCompletedVersion
+      || state.settingsWritePending
+      || settingsWriteVersion !== state.settingsWriteVersion
+      || settingsWriteCompletedVersion !== state.settingsWriteCompletedVersion
+    ) {
+      if (initialLoad && !state.systemSettingsSaving) {
+        const selectedLanguage = state.pendingInitialUILanguage
+          || window.DS_I18N?.getLocale?.()
+          || state.systemSettings.uiLanguage
+          || data.uiLanguage
+          || "zh-CN";
+        const settings = {
+          ...data,
+          uiLanguage: selectedLanguage,
+          uiLanguageConfigured: true,
+        };
+        state.systemSettings = settings;
+        state.rootfsRepositories = data.rootfsRepositories || state.rootfsRepositories || [];
+        state.systemSettingsLoaded = true;
+        renderSystemSettings(settings);
+      }
+      return state.systemSettings;
+    }
     state.systemSettings = data || {};
     state.rootfsRepositories = data.rootfsRepositories || state.rootfsRepositories || [];
+    state.systemSettingsLoaded = true;
+    if (data?.uiLanguageConfigured) {
+      state.confirmedUILanguage = data.uiLanguage || state.confirmedUILanguage || "zh-CN";
+      window.DS_UI_LANGUAGE_DEFAULT = state.confirmedUILanguage;
+      window.DS_UI_LANGUAGE_CONFIGURED = true;
+      window.DS_I18N?.setInitialLocaleSetupRequired?.(false);
+    }
     renderSystemSettings(data || {});
   } catch (err) {
     const status = $("#settingsStatus");
@@ -3307,6 +3626,120 @@ function setInputValue(selector, value) {
 function setChecked(selector, value) {
   const node = $(selector);
   if (node) node.checked = Boolean(value);
+}
+
+function configuredUILanguage() {
+  return state.confirmedUILanguage || state.systemSettings.uiLanguage || window.DS_UI_LANGUAGE_DEFAULT || "zh-CN";
+}
+
+function beginSettingsWrite() {
+  const version = state.settingsWriteVersion + 1;
+  state.settingsWriteVersion = version;
+  state.settingsWritePending = true;
+  return version;
+}
+
+function completeSettingsWrite(version) {
+  if (version !== state.settingsWriteVersion) return;
+  state.settingsWriteCompletedVersion = version;
+  state.settingsWritePending = false;
+}
+
+function failSettingsWrite(version) {
+  if (version === state.settingsWriteVersion) state.settingsWritePending = false;
+}
+
+function enqueueSettingsSave(save) {
+  const queuedSave = state.settingsSaveQueue.then(save, save);
+  state.settingsSaveQueue = queuedSave.catch(() => {});
+  return queuedSave;
+}
+
+async function persistUILanguageConfiguration(language) {
+  const requested = language === "en" ? "en" : "zh-CN";
+  const version = state.uiLanguageSaveVersion + 1;
+  const settingsWriteVersion = beginSettingsWrite();
+  state.uiLanguageSaveVersion = version;
+  state.uiLanguageSavePending = true;
+  const save = async () => {
+    const data = await api("/api/settings/ui-language", {
+      method: "PUT",
+      body: JSON.stringify({ uiLanguage: requested }),
+    });
+    const savedLanguage = data.uiLanguage || requested;
+    window.DS_UI_LANGUAGE_DEFAULT = savedLanguage;
+    window.DS_UI_LANGUAGE_CONFIGURED = true;
+    state.confirmedUILanguage = savedLanguage;
+    state.systemSettings = {
+      ...state.systemSettings,
+      uiLanguage: savedLanguage,
+      uiLanguageConfigured: true,
+      rootfsRepositories: data.rootfsRepositories || state.rootfsRepositories,
+    };
+    if (Array.isArray(data.rootfsRepositories)) {
+      state.rootfsRepositories = data.rootfsRepositories;
+      state.rootfsAssets = [];
+      state.rootfsErrors = [];
+      state.rootfsAssetsLoaded = false;
+      state.rootfsAssetsLoadedAt = 0;
+      state.rootfsAssetsArchitecture = "";
+      renderSettingsRepositories(data.rootfsRepositories);
+      renderRepositories();
+    }
+    if (version === state.uiLanguageSaveVersion) {
+      state.pendingInitialUILanguage = "";
+      state.uiLanguageSaveCompletedVersion = version;
+      state.uiLanguageSavePending = false;
+      window.DS_I18N?.setInitialLocaleSetupRequired?.(false);
+      setInputValue("#settingsUILanguage", savedLanguage);
+    }
+    completeSettingsWrite(settingsWriteVersion);
+    return data;
+  };
+  const queuedSave = enqueueSettingsSave(save);
+  try {
+    return await queuedSave;
+  } catch (err) {
+    failSettingsWrite(settingsWriteVersion);
+    if (version === state.uiLanguageSaveVersion) state.uiLanguageSavePending = false;
+    throw err;
+  }
+}
+
+async function updateSettingsUILanguage(language) {
+  window.DS_I18N?.setLocale?.(language, { reload: false });
+  const save = persistUILanguageConfiguration(language);
+  const version = state.uiLanguageSaveVersion;
+  try {
+    await save;
+    if (version === state.uiLanguageSaveVersion) toast(t("settings.uiLanguageSaved"));
+  } catch (err) {
+    if (version !== state.uiLanguageSaveVersion) return;
+    const rollbackLanguage = configuredUILanguage();
+    window.DS_I18N?.setLocale?.(rollbackLanguage, { reload: false });
+    setInputValue("#settingsUILanguage", rollbackLanguage);
+    throw err;
+  }
+}
+
+async function savePendingInitialUILanguage() {
+  const language = state.pendingInitialUILanguage;
+  if (!language || !state.authenticated) return;
+  if (state.initialUILanguageSavePromise) return state.initialUILanguageSavePromise;
+  const save = (async () => {
+    try {
+      await persistUILanguageConfiguration(language);
+    } catch (err) {
+      window.DS_I18N?.setInitialLocaleSetupRequired?.(true);
+      throw err;
+    }
+  })();
+  state.initialUILanguageSavePromise = save;
+  try {
+    return await save;
+  } finally {
+    if (state.initialUILanguageSavePromise === save) state.initialUILanguageSavePromise = null;
+  }
 }
 
 function updateSettingsModeUI() {
@@ -3331,9 +3764,9 @@ function batteryMonitoringEnabled(settings = state.systemSettings) {
 }
 
 function renderBatteryMonitoringDisabled() {
-  renderBatteryPower({ message: "电池监控已关闭" });
+  renderBatteryPower({ message: t("battery.monitoringDisabled") });
   const live = $("#batteryLiveOverview");
-  if (live) live.innerHTML = `<div class="empty-state">电池监控已关闭</div>`;
+  if (live) live.innerHTML = `<div class="empty-state">${escapeHTML(t("battery.monitoringDisabled"))}</div>`;
 }
 
 function updateBatteryFeatureUI(settings = state.systemSettings) {
@@ -3349,6 +3782,7 @@ function updateBatteryFeatureUI(settings = state.systemSettings) {
   [
     "#settingsBatteryStatsSampleSeconds",
     "#settingsBatteryStatsWriteMinutes",
+    "#settingsBatteryStatsRetentionDays",
     "#settingsBatterySeriesCells",
     "#settingsBatteryDirectPower",
   ].forEach((selector) => {
@@ -3358,7 +3792,7 @@ function updateBatteryFeatureUI(settings = state.systemSettings) {
     input.closest("label")?.classList.toggle("disabled", !monitoring);
   });
   if (!monitoring) {
-    state.batteryPower = { message: "电池监控已关闭" };
+    state.batteryPower = { message: t("battery.monitoringDisabled") };
     renderBatteryMonitoringDisabled();
     if (state.currentView === "battery") switchView("overview", { silentBatteryRedirect: true });
   }
@@ -3369,6 +3803,7 @@ function updateBatterySettingsFormUI() {
   [
     "#settingsBatteryStatsSampleSeconds",
     "#settingsBatteryStatsWriteMinutes",
+    "#settingsBatteryStatsRetentionDays",
     "#settingsBatterySeriesCells",
     "#settingsBatteryDirectPower",
   ].forEach((selector) => {
@@ -3394,7 +3829,9 @@ function renderSystemSettings(data = state.systemSettings || {}) {
   setInputValue("#settingsOverviewRefreshSeconds", data.overviewRefreshSeconds || DEFAULT_OVERVIEW_REFRESH_SECONDS);
   setInputValue("#settingsBatteryStatsSampleSeconds", data.batteryStatsSampleSeconds || DEFAULT_BATTERY_STATS_SAMPLE_SECONDS);
   setInputValue("#settingsBatteryStatsWriteMinutes", data.batteryStatsWriteMinutes || DEFAULT_BATTERY_STATS_WRITE_MINUTES);
+  setInputValue("#settingsBatteryStatsRetentionDays", data.batteryStatsRetentionDays || DEFAULT_BATTERY_STATS_RETENTION_DAYS);
   setInputValue("#settingsBatterySeriesCells", data.batterySeriesCells ?? 0);
+	setInputValue("#settingsUILanguage", data.uiLanguage || window.DS_I18N?.getDefaultLocale?.() || "zh-CN");
   setInputValue("#settingsAuthToken", data.authToken || "");
   setInputValue("#settingsDroidspacesPath", data.droidspacesPath || "");
   setInputValue("#settingsCorePath", data.corePath || "");
@@ -3422,8 +3859,8 @@ function renderSystemSettings(data = state.systemSettings || {}) {
   updateBatterySettingsFormUI();
   const status = $("#settingsStatus");
   if (status) {
-    if (data.saved) status.textContent = data.restartRequired ? "已保存。监听模式、地址或端口变更需要重启 WebUI 后完全生效。" : "已保存并同步到配置文件。";
-    else status.textContent = data.configPath ? `配置文件：${data.configPath}` : "当前未指定配置文件，运行态可保存但不会落盘。";
+    if (data.saved) status.textContent = data.restartRequired ? t("settings.savedRestartRequired") : t("settings.saved");
+    else status.textContent = data.configPath ? t("settings.configPath", { path: data.configPath }) : t("settings.noConfigPath");
   }
 }
 
@@ -3432,27 +3869,27 @@ function renderCoreUpdate(data = state.coreUpdate) {
   const action = $("#coreUpdateBtn");
   if (!node || !action) return;
   if (!data) {
-    node.textContent = "尚未检查更新";
-    action.textContent = "下载并更新";
+    node.textContent = t("settings.notChecked");
+    action.textContent = t("settings.downloadUpdate");
     return;
   }
-  const current = data.currentVersion || state.status?.coreVersion || "未知";
-  const latest = data.latestVersion || "未获取";
+  const current = data.currentVersion || state.status?.coreVersion || t("settings.unknown");
+  const latest = data.latestVersion || t("settings.notFetched");
   const asset = data.assetName || data.asset?.name || "-";
   const architecture = data.architecture || data.arch || "-";
-  const source = data.source || "GitHub 官方 Release";
+  const source = data.source || t("settings.officialRelease");
   const updateAvailable = data.updateAvailable;
-  const stateText = data.status === "updating" ? "正在更新" : updateAvailable === false ? "已是最新版本" : updateAvailable === true ? "有可用更新" : (data.message || "检查完成");
+  const stateText = data.status === "updating" ? t("settings.updating") : updateAvailable === false ? t("settings.upToDate") : updateAvailable === true ? t("settings.updateAvailable") : (data.message || t("settings.checkComplete"));
   const rows = [
-    ["当前版本", current],
-    ["最新版本", latest],
-    ["状态", stateText],
-    ["架构", architecture],
-    ["发布包", asset],
-    ["来源", source],
+    [t("settings.currentVersion"), current],
+    [t("settings.latestVersion"), latest],
+    [t("settings.status"), stateText],
+    [t("settings.architecture"), architecture],
+    [t("settings.releaseAsset"), asset],
+    [t("settings.source"), source],
   ];
   node.innerHTML = rows.map(([key, value]) => `<div class="summary-row"><span>${escapeHTML(key)}</span><strong>${escapeHTML(String(value || "-"))}</strong></div>`).join("");
-  action.textContent = updateAvailable === false ? "重新安装" : "下载并更新";
+  action.textContent = updateAvailable === false ? t("settings.reinstall") : t("settings.downloadUpdate");
 }
 
 async function checkCoreUpdate(showBusy = true) {
@@ -3470,8 +3907,8 @@ async function checkCoreUpdate(showBusy = true) {
 
 async function startCoreUpdate() {
   const checked = state.coreUpdate || await checkCoreUpdate(false);
-  const target = checked.latestVersion || "最新官方版本";
-  if (!window.confirm(`将从 Droidspaces 官方 GitHub Release 下载并替换核心程序为 ${target}。现有二进制会保留为 .previous 备份。继续吗？`)) return;
+  const target = checked.latestVersion || t("settings.latestOfficialVersion");
+  if (!window.confirm(t("settings.updateConfirm", { target }))) return;
   setBusy(true);
   try {
     const data = await api("/api/core/update", { method: "POST", body: JSON.stringify({}) });
@@ -3480,7 +3917,7 @@ async function startCoreUpdate() {
     if (data.task) state.tasks[data.task.id] = data.task;
     trackTask(data.taskId, async () => {
       await Promise.allSettled([loadStatus(true), checkCoreUpdate(false), loadTasks()]);
-      toast("核心程序已更新并通知 daemon 刷新");
+      toast(t("settings.updateComplete"));
     });
     openTaskPanel();
   } finally {
@@ -3505,7 +3942,9 @@ function rootfsRepositoryRow(repository, index, settings = false) {
   const nameAttribute = settings ? `data-settings-repo-name="${index}"` : `data-repo-name="${index}"`;
   const urlAttribute = settings ? `data-settings-repo-url="${index}"` : `data-repo-url="${index}"`;
   const removeAttribute = settings ? `data-settings-repo-remove="${index}"` : `data-repo-remove="${index}"`;
-  return `<div class="repo-row"><input ${nameAttribute} type="text" placeholder="名称" value="${escapeHTML(info.name)}" /><input ${urlAttribute} type="url" placeholder="${escapeHTML(ROOTFS_REPOSITORY_URL_PLACEHOLDER)}" title="可填写 rootfs.json、lxc-image 镜像站或南京大学镜像站" value="${escapeHTML(info.url)}" /><button class="icon-btn danger" type="button" ${removeAttribute} title="删除仓库" aria-label="删除仓库">×</button></div>`;
+  const repositoryHelp = uiText("可填写 rootfs.json、lxc-image 镜像站或南京大学镜像站", "Use a rootfs.json URL, an lxc-image mirror, or the Nanjing University mirror");
+  const repositoryPlaceholder = uiText("rootfs.json 或 https://images.linuxcontainers.org/", "rootfs.json or https://images.linuxcontainers.org/");
+  return `<div class="repo-row"><input ${nameAttribute} type="text" placeholder="${uiText("名称", "Name")}" value="${escapeHTML(info.name)}" /><input ${urlAttribute} type="url" placeholder="${escapeHTML(repositoryPlaceholder)}" title="${escapeHTML(repositoryHelp)}" value="${escapeHTML(info.url)}" /><button class="icon-btn danger" type="button" ${removeAttribute} title="${uiText("删除仓库", "Delete Repository")}" aria-label="${uiText("删除仓库", "Delete Repository")}">×</button></div>`;
 }
 
 function isLinuxContainersRepositoryEntry(repository) {
@@ -3546,7 +3985,7 @@ function renderSettingsRepositoryPresets(repos) {
   if (!enabledInput || !status) return;
   const enabled = hasLinuxContainersCNMirrorRepository(repos);
   enabledInput.checked = enabled;
-  status.textContent = enabled ? "南京大学镜像" : "官方源";
+  status.textContent = enabled ? t("settings.njuMirror") : t("settings.officialSource");
   status.classList.toggle("running", enabled);
   status.classList.toggle("stopped", !enabled);
 }
@@ -3578,7 +4017,9 @@ function collectSystemSettings() {
     overviewRefreshSeconds: Number($("#settingsOverviewRefreshSeconds")?.value || DEFAULT_OVERVIEW_REFRESH_SECONDS),
     batteryStatsSampleSeconds: Number($("#settingsBatteryStatsSampleSeconds")?.value || DEFAULT_BATTERY_STATS_SAMPLE_SECONDS),
     batteryStatsWriteMinutes: Number($("#settingsBatteryStatsWriteMinutes")?.value || DEFAULT_BATTERY_STATS_WRITE_MINUTES),
+    batteryStatsRetentionDays: Number($("#settingsBatteryStatsRetentionDays")?.value || DEFAULT_BATTERY_STATS_RETENTION_DAYS),
     authToken: $("#settingsAuthToken")?.value.trim() || "",
+    uiLanguage: $("#settingsUILanguage")?.value || "zh-CN",
     droidspacesPath: $("#settingsDroidspacesPath")?.value.trim() || "",
     corePath: $("#settingsCorePath")?.value.trim() || "",
     // imageRoot remains a backend compatibility setting. It has no editable UI
@@ -3603,11 +4044,22 @@ function collectSystemSettings() {
 }
 
 async function saveSystemSettingsFromForm() {
+  if (state.systemSettingsSaving) return;
   const payload = collectSystemSettings();
-  if (!payload.rootfsRepositories.length) throw new Error("至少保留一个云端镜像仓库");
+  if (!payload.rootfsRepositories.length) {
+    throw new Error(uiText("至少保留一个云端镜像仓库", "Keep at least one cloud image repository"));
+  }
+  const settingsWriteVersion = beginSettingsWrite();
+  state.systemSettingsSaving = true;
   setBusy(true);
   try {
-    const data = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
+    const data = await enqueueSettingsSave(() => api("/api/settings", { method: "PUT", body: JSON.stringify(payload) }));
+    const savedLanguage = data.uiLanguage || payload.uiLanguage;
+    window.DS_UI_LANGUAGE_DEFAULT = savedLanguage;
+    window.DS_UI_LANGUAGE_CONFIGURED = true;
+    state.confirmedUILanguage = savedLanguage;
+    state.pendingInitialUILanguage = "";
+    window.DS_I18N?.setInitialLocaleSetupRequired?.(false);
     state.systemSettings = data;
     state.rootfsRepositories = data.rootfsRepositories || payload.rootfsRepositories;
     state.rootfsAssets = [];
@@ -3622,9 +4074,14 @@ async function saveSystemSettingsFromForm() {
     restartOverviewRefreshTimer();
     renderRepositories();
     renderNetworkSettings();
-    toast(data.restartRequired ? "设置已保存，监听变更重启后生效" : "系统设置已保存");
+    completeSettingsWrite(settingsWriteVersion);
+    toast(data.restartRequired ? uiText("设置已保存，监听变更重启后生效", "Settings saved. Listen changes take effect after restart.") : uiText("系统设置已保存", "System settings saved"));
     await loadStatus().catch(() => {});
+  } catch (err) {
+    failSettingsWrite(settingsWriteVersion);
+    throw err;
   } finally {
+    state.systemSettingsSaving = false;
     setBusy(false);
   }
 }
@@ -3647,7 +4104,7 @@ async function loadRootfsAssets({ forceRefresh = false } = {}) {
 
   setRootfsLoading(true);
   const list = $("#rootfsList");
-  list.innerHTML = `<div class="empty-state">加载中</div>`;
+  list.innerHTML = `<div class="empty-state">${uiText("加载中", "Loading")}</div>`;
   try {
     const params = new URLSearchParams();
     if (arch) params.set("arch", arch);
@@ -3698,7 +4155,7 @@ async function saveRepositories() {
   state.rootfsAssetsLoaded = false;
   state.rootfsAssetsLoadedAt = 0;
   renderRepositories();
-  toast("仓库已保存");
+  toast(uiText("仓库已保存", "Repositories saved"));
   await loadRootfsAssets({ forceRefresh: true });
 }
 
@@ -3737,9 +4194,9 @@ function renderRootfsSourceFilter(assets) {
   if (!select) return;
   const sources = rootfsAssetSources(assets);
   if (state.rootfsSourceFilter && !sources.includes(state.rootfsSourceFilter)) state.rootfsSourceFilter = "";
-  select.innerHTML = [`<option value="">全部镜像（${assets.length}）</option>`, ...sources.map((source) => {
+  select.innerHTML = [`<option value="">${uiText(`全部镜像（${assets.length}）`, `All Images (${assets.length})`)}</option>`, ...sources.map((source) => {
     const count = assets.filter((asset) => rootfsAssetSource(asset) === source).length;
-    return `<option value="${escapeHTML(source)}">${escapeHTML(source)}（${count}）</option>`;
+    return `<option value="${escapeHTML(source)}">${escapeHTML(source)}${uiText(`（${count}）`, ` (${count})`)}</option>`;
   })].join("");
   select.value = state.rootfsSourceFilter;
   select.disabled = sources.length === 0;
@@ -3753,8 +4210,8 @@ function renderRootfsAssets(assets, errors = []) {
   if (!filteredAssets.length) {
     const hasSearch = Boolean(String($("#rootfsRemoteSearch")?.value || "").trim());
     const emptyText = visibleAssets.length
-      ? (hasSearch ? "没有匹配的云端镜像" : "当前来源没有可用镜像")
-      : (errors.length ? escapeHTML(errors.join("\n")) : "暂无可用镜像");
+      ? (hasSearch ? uiText("没有匹配的云端镜像", "No matching cloud images") : uiText("当前来源没有可用镜像", "No images are available from this source"))
+      : (errors.length ? escapeHTML(errors.join("\n")) : uiText("暂无可用镜像", "No cloud images available"));
     list.innerHTML = `<div class="empty-state">${emptyText}</div>`;
     return;
   }
@@ -3766,12 +4223,12 @@ function renderRootfsAssets(assets, errors = []) {
     const buildDate = formatRootfsBuildDate(asset.buildDate);
     const description = rootfsAssetDescription(asset);
     const descriptionMarkup = description ? `<p class="rootfs-desc rootfs-cloud-description" title="${escapeHTML(description)}">${escapeHTML(description)}</p>` : "";
-    return `<article class="rootfs-item rootfs-cloud-item"><div class="rootfs-cloud-primary"><div class="rootfs-template-title">${rootfsDistroIcon(asset)}<h3>${escapeHTML(title)}</h3></div><span class="badge rootfs-cloud-chip" title="架构">${escapeHTML(asset.architecture || "-")}</span><span class="badge rootfs-cloud-chip" title="变体">${escapeHTML(variant)}</span></div>${descriptionMarkup}<div class="rootfs-cloud-source-row"><span class="rootfs-cloud-label">镜像来源</span><span class="badge rootfs-source-badge ${rootfsSourceBadgeClass(source)}">${escapeHTML(source)}</span>${rootfsSupportBadge(asset)}</div><div class="rootfs-cloud-footer"><span class="rootfs-cloud-stat"><small>系统包大小</small><strong>${fmtSize(asset.sizeBytes)}</strong></span><span class="rootfs-cloud-stat"><small>系统包日期时间</small><strong>${escapeHTML(buildDate)}</strong></span><button class="text-btn primary" data-rootfs="${encoded}">下载</button></div></article>`;
+    return `<article class="rootfs-item rootfs-cloud-item"><div class="rootfs-cloud-primary"><div class="rootfs-template-title">${rootfsDistroIcon(asset)}<h3>${escapeHTML(title)}</h3></div><span class="badge rootfs-cloud-chip" title="${uiText("架构", "Architecture")}">${escapeHTML(asset.architecture || "-")}</span><span class="badge rootfs-cloud-chip" title="${uiText("变体", "Variant")}">${escapeHTML(variant)}</span></div>${descriptionMarkup}<div class="rootfs-cloud-source-row"><span class="rootfs-cloud-label">${uiText("镜像来源", "Image Source")}</span><span class="badge rootfs-source-badge ${rootfsSourceBadgeClass(source)}">${escapeHTML(source)}</span>${rootfsSupportBadge(asset)}</div><div class="rootfs-cloud-footer"><span class="rootfs-cloud-stat"><small>${uiText("系统包大小", "Package Size")}</small><strong>${fmtSize(asset.sizeBytes)}</strong></span><span class="rootfs-cloud-stat"><small>${uiText("系统包日期时间", "Package Date")}</small><strong>${escapeHTML(buildDate)}</strong></span><button class="text-btn primary" data-rootfs="${encoded}">${uiText("下载", "Download")}</button></div></article>`;
   }).join("");
   if (errors.length) toast(errors.join("\n"));
 }
 
-function setDownloadSubmissionState(button, submittingLabel = "正在提交...") {
+function setDownloadSubmissionState(button, submittingLabel = uiText("正在提交...", "Submitting...")) {
   if (!button) return () => {};
   const original = {
     disabled: button.disabled,
@@ -3792,14 +4249,14 @@ function setDownloadSubmissionState(button, submittingLabel = "正在提交...")
 async function downloadRootfs(asset, button) {
   if (button?.disabled) return;
   const restoreButton = setDownloadSubmissionState(button);
-  toast("正在校验镜像来源并提交下载任务...", 8000);
+  toast(uiText("正在校验镜像来源并提交下载任务...", "Validating the image source and submitting the download..."), 8000);
   setBusy(true);
   try {
     const data = await api("/api/rootfs/download", { method: "POST", body: JSON.stringify(asset) });
     trackTask(data.taskId);
     const completed = String(data.task?.status || "").toLowerCase() === "done";
     if (!completed) openTaskPanel();
-    toast(completed ? "已复用已下载的镜像" : data.shared ? "已复用正在进行的下载" : "已开始下载");
+    toast(completed ? uiText("已复用已下载的镜像", "Using the downloaded image") : data.shared ? uiText("已复用正在进行的下载", "Using the in-progress download") : uiText("已开始下载", "Download started"));
   } catch (err) {
     toast(err.message);
   } finally {
@@ -3811,7 +4268,7 @@ async function downloadRootfs(asset, button) {
 async function uploadLocalRootfs() {
   const input = $("#rootfsUploadFile");
   const file = input?.files?.[0];
-  if (!file) { toast("请选择要上传的镜像模板"); return; }
+  if (!file) { toast(uiText("请选择要上传的镜像模板", "Select an image template to upload")); return; }
   const form = new FormData();
   form.append("file", file);
   setBusy(true);
@@ -3821,7 +4278,7 @@ async function uploadLocalRootfs() {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     input.value = "";
-    toast("模板已上传");
+    toast(uiText("模板已上传", "Template uploaded"));
     await loadLocalRootfs();
   } catch (err) {
     toast(err.message);
@@ -3845,8 +4302,8 @@ async function loadLocalRootfs() {
 }
 
 function renderLocalRootfs() {
-  renderRootfsItems("#localRootfsList", state.localRootfs.filter((item) => item.kind !== "backup"), "暂无本地模板");
-  renderRootfsItems("#backupRootfsList", state.localRootfs.filter((item) => item.kind === "backup"), "暂无备份导出");
+  renderRootfsItems("#localRootfsList", state.localRootfs.filter((item) => item.kind !== "backup"), uiText("暂无本地模板", "No local templates"));
+  renderRootfsItems("#backupRootfsList", state.localRootfs.filter((item) => item.kind === "backup"), uiText("暂无备份导出", "No exported backups"));
 }
 
 function renderRootfsItems(selector, items, emptyText) {
@@ -3862,18 +4319,18 @@ function renderRootfsItems(selector, items, emptyText) {
     const variant = localRootfsVariant(item);
     const canDownload = item.kind === "archive" || item.kind === "backup" || item.kind === "image";
     const downloadURL = `/api/rootfs/local/download?path=${encodeURIComponent(item.path)}`;
-    const download = canDownload ? `<button class="text-btn" data-download-url="${escapeHTML(downloadURL)}" data-download-name="${escapeHTML(title)}">下载</button>` : "";
-    const remove = canDownload ? `<button class="text-btn danger" data-delete-rootfs="${escapeHTML(item.path)}" data-delete-rootfs-name="${escapeHTML(title)}">删除</button>` : "";
-    const create = item.kind === "backup" ? "" : `<button class="text-btn primary rootfs-local-create" data-use-local-rootfs="${escapeHTML(item.path)}">创建容器</button>`;
+    const download = canDownload ? `<button class="text-btn" data-download-url="${escapeHTML(downloadURL)}" data-download-name="${escapeHTML(title)}">${uiText("下载", "Download")}</button>` : "";
+    const remove = canDownload ? `<button class="text-btn danger" data-delete-rootfs="${escapeHTML(item.path)}" data-delete-rootfs-name="${escapeHTML(title)}">${uiText("删除", "Delete")}</button>` : "";
+    const create = item.kind === "backup" ? "" : `<button class="text-btn primary rootfs-local-create" data-use-local-rootfs="${escapeHTML(item.path)}">${uiText("创建容器", "Create Container")}</button>`;
     const source = localRootfsSource(item);
     const actions = download || remove ? `<div class="rootfs-local-actions">${download}${remove}</div>` : "<span></span>";
-    return `<article class="rootfs-item rootfs-local-item"><div class="rootfs-cloud-primary"><div class="rootfs-template-title">${rootfsDistroIcon(item)}<h3>${escapeHTML(title)}</h3></div><span class="badge rootfs-cloud-chip" title="架构">${escapeHTML(architecture)}</span><span class="badge rootfs-cloud-chip" title="变体">${escapeHTML(variant)}</span></div><div class="rootfs-cloud-source-row"><span class="rootfs-cloud-label">镜像来源</span><span class="badge rootfs-local-source">${escapeHTML(source)}</span>${localRootfsSupportBadge(item)}${create}</div><div class="rootfs-cloud-footer"><span class="rootfs-cloud-stat"><small>系统包大小</small><strong>${fmtSize(item.size)}</strong></span><span class="rootfs-cloud-stat"><small>系统包日期时间</small><strong>${fmtTime(item.modified)}</strong></span>${actions}</div></article>`;
+    return `<article class="rootfs-item rootfs-local-item"><div class="rootfs-cloud-primary"><div class="rootfs-template-title">${rootfsDistroIcon(item)}<h3>${escapeHTML(title)}</h3></div><span class="badge rootfs-cloud-chip" title="${uiText("架构", "Architecture")}">${escapeHTML(architecture)}</span><span class="badge rootfs-cloud-chip" title="${uiText("变体", "Variant")}">${escapeHTML(variant)}</span></div><div class="rootfs-cloud-source-row"><span class="rootfs-cloud-label">${uiText("镜像来源", "Image Source")}</span><span class="badge rootfs-local-source">${escapeHTML(source)}</span>${localRootfsSupportBadge(item)}${create}</div><div class="rootfs-cloud-footer"><span class="rootfs-cloud-stat"><small>${uiText("系统包大小", "Package Size")}</small><strong>${fmtSize(item.size)}</strong></span><span class="rootfs-cloud-stat"><small>${uiText("系统包日期时间", "Package Date")}</small><strong>${fmtTime(item.modified)}</strong></span>${actions}</div></article>`;
   }).join("");
 }
 
 function kindText(kind) {
-  const labels = { directory: "目录", image: "镜像", archive: "压缩包", backup: "备份" };
-  return labels[kind] || kind || "未知";
+  const labels = { directory: uiText("目录", "Directory"), image: uiText("镜像", "Image"), archive: uiText("压缩包", "Archive"), backup: uiText("备份", "Backup") };
+  return labels[kind] || kind || uiText("未知", "Unknown");
 }
 
 function createTemplateSource() {
@@ -3891,16 +4348,16 @@ function localRootfsHasOfficialSupport(item) {
 }
 
 function createTemplateVariantInfo(variant) {
-  const value = String(variant || "").trim() || "标准";
+  const value = String(variant || "").trim() || uiText("标准", "Standard");
   switch (value.toLowerCase()) {
     case "default":
-      return { value, label: "default · 标准", title: "default：常规容器根文件系统" };
+      return { value, label: uiText("default · 标准", "default · Standard"), title: uiText("default：常规容器根文件系统", "default: regular container root filesystem") };
     case "cloud":
-      return { value, label: "cloud · cloud-init", title: "cloud：包含 cloud-init 的云初始化镜像" };
+      return { value, label: "cloud · cloud-init", title: uiText("cloud：包含 cloud-init 的云初始化镜像", "cloud: cloud-init image") };
     case "tinycloud":
-      return { value, label: "tinycloud · Incus", title: "tinycloud：面向 Incus 的轻量初始化镜像" };
+      return { value, label: "tinycloud · Incus", title: uiText("tinycloud：面向 Incus 的轻量初始化镜像", "tinycloud: lightweight Incus initialization image") };
     default:
-      return { value, label: value, title: `变体：${value}` };
+      return { value, label: value, title: uiText(`变体：${value}`, `Variant: ${value}`) };
   }
 }
 
@@ -3965,7 +4422,7 @@ function updateCreateCloudInitPasswordVisibility() {
   const control = $("#createCloudInitPasswordVisibility");
   if (!password || !control) return;
   const visible = password.type === "text";
-  control.title = visible ? "隐藏密码" : "显示密码";
+  control.title = t(visible ? "create.hidePassword" : "create.showPassword");
   control.setAttribute("aria-label", control.title);
   control.setAttribute("aria-pressed", String(visible));
 }
@@ -4030,19 +4487,19 @@ function createCloudInitPasswordNotice() {
 }
 
 function validateCloudInitUserData(value) {
-  if (String(value).includes("\0")) return { error: "用户数据不能包含 NUL 字符" };
+  if (String(value).includes("\0")) return { error: uiText("用户数据不能包含 NUL 字符", "User data cannot contain NUL characters") };
   if (new TextEncoder().encode(String(value)).length > CLOUD_INIT_MAX_DOCUMENT_BYTES) {
-    return { error: "用户数据不能超过 64 KiB" };
+    return { error: uiText("用户数据不能超过 64 KiB", "User data cannot exceed 64 KiB") };
   }
   return { value: String(value) };
 }
 
 function cloudInitSSHPortResult() {
   const raw = String($("#createCloudInitSSHPort")?.value || "").trim();
-  if (!/^\d+$/.test(raw)) return { error: "SSH 端口必须是 1 到 65535 之间的整数" };
+  if (!/^\d+$/.test(raw)) return { error: uiText("SSH 端口必须是 1 到 65535 之间的整数", "SSH port must be an integer from 1 to 65535") };
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 1 || value > 65535) {
-    return { error: "SSH 端口必须是 1 到 65535 之间的整数" };
+    return { error: uiText("SSH 端口必须是 1 到 65535 之间的整数", "SSH port must be an integer from 1 to 65535") };
   }
   return { value };
 }
@@ -4052,9 +4509,9 @@ function createCloudInitSSHSettings(username, password) {
   const enabled = Boolean($("#createCloudInitSSHEnabled")?.checked) || rootSSH;
   if (!enabled) return { enabled: false };
   if (rootSSH && username !== "root") {
-    return { error: "root 用户 SSH 远程管理需要将初始化用户名设为 root" };
+    return { error: uiText("root 用户 SSH 远程管理需要将初始化用户名设为 root", "Root SSH remote access requires the initial username to be root") };
   }
-  if (rootSSH && !password) return { error: "启用 root 用户 SSH 远程管理需要设置 root 登录密码" };
+  if (rootSSH && !password) return { error: uiText("启用 root 用户 SSH 远程管理需要设置 root 登录密码", "Root SSH remote access requires a root login password") };
   const port = cloudInitSSHPortResult();
   if (port.error) return port;
   return {
@@ -4120,7 +4577,7 @@ function createCloudInitUserDataResult() {
   const packages = cloudInitPackageList($("#createCloudInitPackages")?.value);
   const commands = cloudInitStringList($("#createCloudInitCommands")?.value);
   if ((!username && (password || sshKeys.length)) || (username && !/^[a-z_][a-z0-9_-]*$/i.test(username))) {
-    return { error: username ? "用户名仅可使用字母、数字、下划线和连字符" : "设置密码或 SSH 公钥时需要填写用户名" };
+    return { error: username ? uiText("用户名仅可使用字母、数字、下划线和连字符", "Username may contain only letters, numbers, underscores, and hyphens") : uiText("设置密码或 SSH 公钥时需要填写用户名", "A username is required when setting a password or SSH public keys") };
   }
 
   const sshSettings = createCloudInitSSHSettings(username, password);
@@ -4169,11 +4626,11 @@ function updateCreateCloudInitUserDataSummary() {
   if (!summary) return;
   const enabledInput = $("#createCloudInitEnabled");
   if (!enabledInput?.checked || enabledInput.disabled) {
-    summary.textContent = "cloud-init 已关闭，创建时不会应用用户数据或网络配置。";
+    summary.textContent = uiText("cloud-init 已关闭，创建时不会应用用户数据或网络配置。", "cloud-init is disabled, so user data and network configuration will not be applied.");
     return;
   }
   if (createCloudInitUserDataMode() === "advanced") {
-    summary.textContent = $("#createCloudInitUserData")?.value.trim() ? "将使用高级 YAML 覆盖引导配置。" : "高级 YAML 未填写，将使用容器主机名完成初始化。";
+    summary.textContent = $("#createCloudInitUserData")?.value.trim() ? uiText("将使用高级 YAML 覆盖引导配置。", "Advanced YAML will override the guided configuration.") : uiText("高级 YAML 未填写，将使用容器主机名完成初始化。", "No advanced YAML is configured; the container hostname will be used for initialization.");
     return;
   }
 
@@ -4184,23 +4641,23 @@ function updateCreateCloudInitUserDataSummary() {
   }
   const items = [];
   const username = String($("#createCloudInitUsername")?.value || "").trim();
-  if (username) items.push(`用户 ${username}`);
+  if (username) items.push(uiText(`用户 ${username}`, `User ${username}`));
   const sshKeyCount = cloudInitStringList($("#createCloudInitSSHKeys")?.value).length;
-  if (sshKeyCount) items.push(`${sshKeyCount} 条 SSH 公钥`);
+  if (sshKeyCount) items.push(uiText(`${sshKeyCount} 条 SSH 公钥`, `${sshKeyCount} SSH public key${sshKeyCount === 1 ? "" : "s"}`));
   const packageCount = cloudInitPackageList($("#createCloudInitPackages")?.value).length;
-  if (packageCount) items.push(`${packageCount} 个软件包`);
+  if (packageCount) items.push(uiText(`${packageCount} 个软件包`, `${packageCount} package${packageCount === 1 ? "" : "s"}`));
   const commandCount = cloudInitStringList($("#createCloudInitCommands")?.value).length;
-  if (commandCount) items.push(`${commandCount} 条启动命令`);
+  if (commandCount) items.push(uiText(`${commandCount} 条启动命令`, `${commandCount} startup command${commandCount === 1 ? "" : "s"}`));
   const sshEnabled = Boolean($("#createCloudInitSSHEnabled")?.checked);
   const rootSSH = Boolean($("#createCloudInitRootSSH")?.checked);
   if (sshEnabled) {
     const port = String($("#createCloudInitSSHPort")?.value || "22").trim() || "22";
-    items.push(`SSH 远程管理（端口 ${port}）`);
+    items.push(uiText(`SSH 远程管理（端口 ${port}）`, `SSH remote access (port ${port})`));
   }
   if (rootSSH && username === "root" && $("#createCloudInitPassword")?.value) {
-    items.push("root SSH 密码登录");
+    items.push(uiText("root SSH 密码登录", "Root SSH password login"));
   }
-  summary.textContent = items.length ? `将配置${items.join("、")}。` : "未设置额外用户数据，将使用容器主机名完成初始化。";
+  summary.textContent = items.length ? uiText(`将配置${items.join("、")}。`, `Will configure ${items.join(", ")}.`) : uiText("未设置额外用户数据，将使用容器主机名完成初始化。", "No additional user data is configured; the container hostname will be used for initialization.");
 }
 
 function updateCreateCloudInitSSHControls(enabled, advanced) {
@@ -4264,36 +4721,36 @@ function updateCreateFormValidation() {
   const errors = [];
   const name = String($("#createName")?.value || "").trim();
   const nameHasNUL = name.includes(String.fromCharCode(0));
-  if (!name) createFormValidationError("#createName", "容器名称不能为空", errors);
-  else if (name.length > 255 || /[\/\r\n]/.test(name) || nameHasNUL) createFormValidationError("#createName", "名称不能超过 255 个字符，且不能包含 /、换行或 NUL", errors);
-  else if (state.containers.some((container) => String(container.name || "").replaceAll(" ", "-") === name.replaceAll(" ", "-"))) createFormValidationError("#createName", "该容器名称已经存在", errors);
+  if (!name) createFormValidationError("#createName", uiText("容器名称不能为空", "Container name is required"), errors);
+  else if (name.length > 255 || /[\/\r\n]/.test(name) || nameHasNUL) createFormValidationError("#createName", uiText("名称不能超过 255 个字符，且不能包含 /、换行或 NUL", "Name cannot exceed 255 characters or contain /, line breaks, or NUL"), errors);
+  else if (state.containers.some((container) => String(container.name || "").replaceAll(" ", "-") === name.replaceAll(" ", "-"))) createFormValidationError("#createName", uiText("该容器名称已经存在", "A container with this name already exists"), errors);
   else createFormValidationError("#createName", "", errors);
 
   const hostname = String($("#createHostname")?.value || "").trim();
-  createFormValidationError("#createHostname", /[\r\n]/.test(hostname) || hostname.includes(String.fromCharCode(0)) ? "主机名不能包含换行或 NUL 字符" : "", errors);
+  createFormValidationError("#createHostname", /[\r\n]/.test(hostname) || hostname.includes(String.fromCharCode(0)) ? uiText("主机名不能包含换行或 NUL 字符", "Hostname cannot contain line breaks or NUL characters") : "", errors);
 
   const source = createTemplateSource();
   const cloudAsset = source === "cloud" ? selectedCreateCloudAsset() : null;
   const localAsset = source === "local" ? selectedCreateLocalRootfs() : null;
   if (source === "cloud") {
     createFormValidationError("#createLocalRootfs", "", errors);
-    createFormValidationError("#createCloudRootfs", cloudAsset?.downloadUrl ? "" : "请选择可用的云端镜像", errors);
+    createFormValidationError("#createCloudRootfs", cloudAsset?.downloadUrl ? "" : uiText("请选择可用的云端镜像", "Select an available cloud image"), errors);
   } else {
     createFormValidationError("#createCloudRootfs", "", errors);
-    createFormValidationError("#createLocalRootfs", localAsset?.path ? "" : "请选择本地模板", errors);
+    createFormValidationError("#createLocalRootfs", localAsset?.path ? "" : uiText("请选择本地模板", "Select a local template"), errors);
   }
 
   const imageMode = Boolean($("#createUseSparseImage")?.checked);
   const imageSize = Number($("#createImageSize")?.value || 0);
-  createFormValidationError("#createImageSize", !imageMode || (Number.isInteger(imageSize) && imageSize >= 4 && imageSize <= 512) ? "" : "镜像大小必须是 4 到 512 GB 的整数", errors);
+  createFormValidationError("#createImageSize", !imageMode || (Number.isInteger(imageSize) && imageSize >= 4 && imageSize <= 512) ? "" : uiText("镜像大小必须是 4 到 512 GB 的整数", "Image size must be an integer from 4 to 512 GB"), errors);
 
   const netMode = String($("#createNetMode")?.value || "").trim().toLowerCase();
-  createFormValidationError("#createNetMode", ["host", "nat", "none", "gateway"].includes(netMode) ? "" : "网络模式必须是 host、nat、none 或 gateway", errors);
+  createFormValidationError("#createNetMode", ["host", "nat", "none", "gateway"].includes(netMode) ? "" : uiText("网络模式必须是 host、nat、none 或 gateway", "Network mode must be host, nat, none, or gateway"), errors);
   if (netMode === "nat") {
     const natOctet = String($("#createStaticNatOctet4")?.value || "").trim();
     const natIP = natOctet ? staticNATIPValue("create") : "";
     const natConflict = natIP && state.containers.some((container) => String(container.natIp || container.staticNatIp || "") === natIP);
-    createFormValidationError("#createStaticNatOctet4", !staticNATOctetValid(natOctet, 1, 254) ? "NAT 静态 IP 第 4 字节必须是 1 到 254" : (natConflict ? "该 NAT 静态 IP 已被其他容器使用" : ""), errors);
+    createFormValidationError("#createStaticNatOctet4", !staticNATOctetValid(natOctet, 1, 254) ? uiText("NAT 静态 IP 第 4 字节必须是 1 到 254", "The fourth octet of the static NAT IP must be from 1 to 254") : (natConflict ? uiText("该 NAT 静态 IP 已被其他容器使用", "This static NAT IP is already used by another container") : ""), errors);
     createFormValidationError("#createPorts", validateCreatePortForwards($("#createPorts")?.value) || validateCreatePortForwardAvailability($("#createPorts")?.value), errors);
   } else {
     ["#createStaticNatOctet4", "#createPorts"].forEach((selector) => createFormValidationError(selector, "", errors));
@@ -4302,11 +4759,11 @@ function updateCreateFormValidation() {
   if (netMode === "gateway") {
     const gateway = String($("#createGatewayContainer")?.value || "").trim();
     const exists = state.containers.some((container) => String(container.name || "") === gateway);
-    createFormValidationError("#createGatewayContainer", !gateway ? "网关容器不能为空" : (gateway === name ? "网关容器不能是当前容器" : (!exists ? "网关容器尚未安装" : "")), errors);
-    [["#createGatewayNet", "网关网络名", 0], ["#createGatewayIface", "网关内接口", 15], ["#createGatewayBridge", "宿主桥接名", 15]].forEach(([selector, label, max]) => {
+    createFormValidationError("#createGatewayContainer", !gateway ? uiText("网关容器不能为空", "Gateway container is required") : (gateway === name ? uiText("网关容器不能是当前容器", "Gateway container cannot be the current container") : (!exists ? uiText("网关容器尚未安装", "Gateway container is not installed") : "")), errors);
+    [["#createGatewayNet", uiText("网关网络名", "Gateway network"), 0], ["#createGatewayIface", uiText("网关内接口", "Gateway interface"), 15], ["#createGatewayBridge", uiText("宿主桥接名", "Host bridge"), 15]].forEach(([selector, label, max]) => {
       const value = String($(selector)?.value || "").trim();
       const invalid = value && (!/^[A-Za-z0-9_-]+$/.test(value) || (max > 0 && value.length > max));
-      createFormValidationError(selector, invalid ? label + "只能使用字母、数字、下划线和连字符" + (max > 0 ? "，最长 " + max + " 个字符" : "") : "", errors);
+      createFormValidationError(selector, invalid ? uiText(`${label}只能使用字母、数字、下划线和连字符${max > 0 ? `，最长 ${max} 个字符` : ""}`, `${label} may contain only letters, numbers, underscores, and hyphens${max > 0 ? `, up to ${max} characters` : ""}`) : "", errors);
     });
   } else {
     ["#createGatewayContainer", "#createGatewayNet", "#createGatewayIface", "#createGatewayBridge"].forEach((selector) => createFormValidationError(selector, "", errors));
@@ -4316,11 +4773,11 @@ function updateCreateFormValidation() {
   createFormValidationError("#createCpus", validateCreateCPU($("#createCpus")?.value), errors);
   createFormValidationError("#createPidsLimit", validateCreatePids($("#createPidsLimit")?.value), errors);
   createFormValidationError("#createDns", validateCreateSafeText($("#createDns")?.value, "DNS"), errors);
-  createFormValidationError("#createBinds", validateCreateSafeText($("#createBinds")?.value, "绑定挂载", true) || validateCreateBinds($("#createBinds")?.value), errors);
+  createFormValidationError("#createBinds", validateCreateSafeText($("#createBinds")?.value, uiText("绑定挂载", "Bind mounts"), true) || validateCreateBinds($("#createBinds")?.value), errors);
   createFormValidationError("#createInit", validateCreateSafeText($("#createInit")?.value, "Init") || validateCreateInit($("#createInit")?.value), errors);
-  createFormValidationError("#createTx11ExtraFlags", $("#createTermuxX11")?.checked ? validateCreateSafeText($("#createTx11ExtraFlags")?.value, "X11 额外参数") : "", errors);
-  createFormValidationError("#createVirglExtraFlags", $("#createVirgl")?.checked ? validateCreateSafeText($("#createVirglExtraFlags")?.value, "VirGL 额外参数") : "", errors);
-  createFormValidationError("#createEnv", validateCreateSafeText($("#createEnv")?.value, "环境变量", true), errors);
+  createFormValidationError("#createTx11ExtraFlags", $("#createTermuxX11")?.checked ? validateCreateSafeText($("#createTx11ExtraFlags")?.value, uiText("X11 额外参数", "Extra X11 flags")) : "", errors);
+  createFormValidationError("#createVirglExtraFlags", $("#createVirgl")?.checked ? validateCreateSafeText($("#createVirglExtraFlags")?.value, uiText("VirGL 额外参数", "Extra VirGL flags")) : "", errors);
+  createFormValidationError("#createEnv", validateCreateSafeText($("#createEnv")?.value, uiText("环境变量", "Environment variables"), true), errors);
 
   const cloudInitSupported = createTemplateSupportsCloudInit(source === "cloud" ? cloudAsset : localAsset, source);
   const cloudInitEnabled = cloudInitSupported && Boolean($("#createCloudInitEnabled")?.checked);
@@ -4328,7 +4785,7 @@ function updateCreateFormValidation() {
     const result = createCloudInitUserDataResult();
     createFormValidationError(createCloudInitUserDataMode() === "advanced" ? "#createCloudInitUserData" : "#createCloudInitUsername", result.error || "", errors);
     const network = String($("#createCloudInitNetworkConfig")?.value || "");
-    createFormValidationError("#createCloudInitNetworkConfig", network.includes(String.fromCharCode(0)) ? "网络定义不能包含 NUL 字符" : (new TextEncoder().encode(network).length > CLOUD_INIT_MAX_DOCUMENT_BYTES ? "网络定义不能超过 64 KiB" : ""), errors);
+    createFormValidationError("#createCloudInitNetworkConfig", network.includes(String.fromCharCode(0)) ? uiText("网络定义不能包含 NUL 字符", "Network definition cannot contain NUL characters") : (new TextEncoder().encode(network).length > CLOUD_INIT_MAX_DOCUMENT_BYTES ? uiText("网络定义不能超过 64 KiB", "Network definition cannot exceed 64 KiB") : ""), errors);
   } else {
     ["#createCloudInitUsername", "#createCloudInitPassword", "#createCloudInitSSHPort", "#createCloudInitUserData", "#createCloudInitNetworkConfig"].forEach((selector) => createFormValidationError(selector, "", errors));
   }
@@ -4376,7 +4833,7 @@ function updateCreateCloudInitUI() {
 }
 
 function createTemplateSupportBadge(official) {
-  if (official) return '<span class="badge template-picker-support official">官方支持</span>';
+  if (official) return `<span class="badge template-picker-support official">${uiText("官方支持", "Officially Supported")}</span>`;
   return rootfsUnsupportedBadge();
 }
 
@@ -4392,20 +4849,20 @@ function createTemplateMatches(item, source, query) {
 
 function createTemplatePickerCard(item, source, value, selected) {
   const details = createTemplateDetails(item, source);
-  const supportLabel = details.official ? "Droidspaces 官方支持" : "非官方支持系统";
+  const supportLabel = details.official ? uiText("Droidspaces 官方支持", "Officially Supported by Droidspaces") : uiText("非官方支持系统", "Unofficial System");
   const sourceClass = source === "cloud" ? `rootfs-source-badge ${rootfsSourceBadgeClass(details.repository)}` : "rootfs-local-source";
   const description = source === "cloud" ? rootfsAssetDescription(item) : "";
   const descriptionMarkup = description ? `<span class="template-picker-card-description" title="${escapeHTML(description)}">${escapeHTML(description)}</span>` : "";
-  const label = [details.title, details.architecture, details.variant.label, details.repository, description, supportLabel].filter(Boolean).join("，");
-  return `<button class="template-picker-card${selected ? " is-selected" : ""}" type="button" aria-pressed="${selected}" aria-label="${escapeHTML(label)}" data-create-template-kind="${source}" data-create-template-value="${escapeHTML(String(value))}"><span class="template-picker-card-primary"><span class="template-picker-card-title">${rootfsDistroIcon(item, "template-picker-distro-icon")}<strong>${escapeHTML(details.title)}</strong></span>${selected ? '<span class="template-picker-selected-mark">已选</span>' : ""}</span><span class="template-picker-card-tags"><span class="badge" title="架构">${escapeHTML(details.architecture)}</span><span class="badge" title="${escapeHTML(details.variant.title)}">${escapeHTML(details.variant.label)}</span></span>${descriptionMarkup}<span class="template-picker-card-source"><span>镜像来源</span><strong class="badge ${sourceClass}" title="${escapeHTML(details.repository)}">${escapeHTML(details.repository)}</strong>${createTemplateSupportBadge(details.official)}</span><span class="template-picker-card-stats"><span><small>系统包大小</small><strong>${escapeHTML(details.size)}</strong></span><span><small>系统包日期时间</small><strong>${escapeHTML(details.buildDate)}</strong></span></span></button>`;
+  const label = [details.title, details.architecture, details.variant.label, details.repository, description, supportLabel].filter(Boolean).join(uiText("，", ", "));
+  return `<button class="template-picker-card${selected ? " is-selected" : ""}" type="button" aria-pressed="${selected}" aria-label="${escapeHTML(label)}" data-create-template-kind="${source}" data-create-template-value="${escapeHTML(String(value))}"><span class="template-picker-card-primary"><span class="template-picker-card-title">${rootfsDistroIcon(item, "template-picker-distro-icon")}<strong>${escapeHTML(details.title)}</strong></span>${selected ? `<span class="template-picker-selected-mark">${uiText("已选", "Selected")}</span>` : ""}</span><span class="template-picker-card-tags"><span class="badge" title="${uiText("架构", "Architecture")}">${escapeHTML(details.architecture)}</span><span class="badge" title="${escapeHTML(details.variant.title)}">${escapeHTML(details.variant.label)}</span></span>${descriptionMarkup}<span class="template-picker-card-source"><span>${uiText("镜像来源", "Image Source")}</span><strong class="badge ${sourceClass}" title="${escapeHTML(details.repository)}">${escapeHTML(details.repository)}</strong>${createTemplateSupportBadge(details.official)}</span><span class="template-picker-card-stats"><span><small>${uiText("系统包大小", "Package Size")}</small><strong>${escapeHTML(details.size)}</strong></span><span><small>${uiText("系统包日期时间", "Package Date")}</small><strong>${escapeHTML(details.buildDate)}</strong></span></span></button>`;
 }
 
 function setCreateTemplatePickerCount(source, count, total, query) {
   if (createTemplateSource() !== source) return;
   const node = $("#createTemplatePickerCount");
   if (!node) return;
-  const label = source === "cloud" ? "云端镜像" : "本地模板";
-  node.textContent = query && count !== total ? `${count} / ${total} 个${label}` : `${count} 个${label}`;
+  const label = source === "cloud" ? uiText("云端镜像", "Cloud Images") : uiText("本地模板", "Local Templates");
+  node.textContent = query && count !== total ? `${count} / ${total} ${label}` : `${count} ${label}`;
 }
 
 function renderCreateTemplateSelection() {
@@ -4414,13 +4871,13 @@ function renderCreateTemplateSelection() {
   const source = createTemplateSource();
   const item = source === "cloud" ? selectedCreateCloudAsset() : selectedCreateLocalRootfs();
   if (!item) {
-    const empty = source === "cloud" && state.rootfsLoading ? "正在读取云端镜像" : "尚未选择模板";
-    node.innerHTML = `<span class="template-picker-selection-label">当前选择</span><span class="template-picker-selection-empty">${empty}</span>`;
+    const empty = source === "cloud" && state.rootfsLoading ? uiText("正在读取云端镜像", "Loading cloud images") : uiText("尚未选择模板", "No template selected");
+    node.innerHTML = `<span class="template-picker-selection-label">${uiText("当前选择", "Current Selection")}</span><span class="template-picker-selection-empty">${escapeHTML(empty)}</span>`;
     return;
   }
   const details = createTemplateDetails(item, source);
-  const origin = source === "cloud" ? "云端镜像" : "本地模板";
-  node.innerHTML = `<span class="template-picker-selection-label">当前选择</span><span class="template-picker-selection-main">${rootfsDistroIcon(item, "template-picker-selection-icon")}<span><strong>${escapeHTML(details.title)}</strong><small>${escapeHTML(details.architecture)} · ${escapeHTML(details.variant.label)} · ${escapeHTML(details.repository)}</small></span></span><span class="template-picker-selection-origin">${origin}</span>`;
+  const origin = source === "cloud" ? uiText("云端镜像", "Cloud Image") : uiText("本地模板", "Local Template");
+  node.innerHTML = `<span class="template-picker-selection-label">${uiText("当前选择", "Current Selection")}</span><span class="template-picker-selection-main">${rootfsDistroIcon(item, "template-picker-selection-icon")}<span><strong>${escapeHTML(details.title)}</strong><small>${escapeHTML(details.architecture)} · ${escapeHTML(details.variant.label)} · ${escapeHTML(details.repository)}</small></span></span><span class="template-picker-selection-origin">${escapeHTML(origin)}</span>`;
 }
 
 function renderCreateLocalTemplatePicker() {
@@ -4431,7 +4888,7 @@ function renderCreateLocalTemplatePicker() {
   const items = allItems.filter((item) => createTemplateMatches(item, "local", query));
   const selectedPath = $("#createLocalRootfs")?.value || "";
   if (!items.length) {
-    list.innerHTML = `<div class="empty-state">${allItems.length ? "没有匹配的本地模板" : "暂无本地模板"}</div>`;
+    list.innerHTML = `<div class="empty-state">${allItems.length ? uiText("没有匹配的本地模板", "No matching local templates") : uiText("暂无本地模板", "No local templates")}</div>`;
   } else {
     list.innerHTML = items.map((item) => createTemplatePickerCard(item, "local", item.path, item.path === selectedPath)).join("");
   }
@@ -4445,7 +4902,7 @@ function renderCreateCloudSourceFilter() {
   const selected = select.value;
   const assets = cloudRootfsAssetsForSelection(state.rootfsAssets);
   const sources = rootfsAssetSources(assets);
-  select.innerHTML = [`<option value="">全部来源（${assets.length}）</option>`, ...sources.map((source) => `<option value="${escapeHTML(source)}">${escapeHTML(source)}（${assets.filter((asset) => rootfsAssetSource(asset) === source).length}）</option>`)].join("");
+  select.innerHTML = [`<option value="">${uiText("全部来源", "All Sources")} (${assets.length})</option>`, ...sources.map((source) => `<option value="${escapeHTML(source)}">${escapeHTML(source)} (${assets.filter((asset) => rootfsAssetSource(asset) === source).length})</option>`)].join("");
   if (sources.includes(selected)) select.value = selected;
   select.disabled = state.rootfsLoading || sources.length <= 1;
 }
@@ -4464,8 +4921,8 @@ function renderCreateCloudTemplatePicker() {
   if (!items.length) {
     const error = state.rootfsErrors[0];
     const message = state.rootfsLoading
-      ? "正在读取云端镜像"
-      : (error ? `云端镜像暂不可用：${error}` : (visibleAssets.length ? "没有匹配的云端镜像" : "暂无可用云端镜像"));
+      ? uiText("正在读取云端镜像", "Loading cloud images")
+      : (error ? uiText(`云端镜像暂不可用：${error}`, `Cloud images are unavailable: ${error}`) : (visibleAssets.length ? uiText("没有匹配的云端镜像", "No matching cloud images") : uiText("暂无可用云端镜像", "No cloud images available")));
     list.innerHTML = `<div class="empty-state">${escapeHTML(message)}</div>`;
   } else {
     list.innerHTML = items.map((item) => {
@@ -4489,12 +4946,12 @@ function renderCreateLocalOptions() {
   const selectedPath = select.value;
   const items = state.localRootfs.filter((item) => item.kind !== "backup");
   if (!items.length) {
-    select.innerHTML = `<option value="">暂无本地模板</option>`;
+    select.innerHTML = `<option value="">${uiText("暂无本地模板", "No local templates")}</option>`;
     renderCreateLocalTemplatePicker();
     return;
   }
   select.innerHTML = [
-    '<option value="">请选择本地模板</option>',
+    `<option value="">${uiText("请选择本地模板", "Select a local template")}</option>`,
     ...items.map((item) => `<option value="${escapeHTML(item.path)}">${escapeHTML(rootfsDisplayName(item))} (${escapeHTML(kindText(item.kind))} · ${escapeHTML(localRootfsSource(item))})</option>`),
   ].join("");
   if (selectedPath && items.some((item) => item.path === selectedPath)) {
@@ -4510,12 +4967,12 @@ function renderCreateCloudOptions() {
   const selectedURL = rootfsAssetDownloadURL(selectedCreateCloudAsset());
   const assets = cloudRootfsAssetsForSelection(state.rootfsAssets);
   if (!assets.length) {
-    select.innerHTML = `<option value="">请先刷新云端列表</option>`;
+    select.innerHTML = `<option value="">${uiText("请先刷新云端列表", "Refresh the cloud image list first")}</option>`;
     renderCreateCloudSourceHint();
     renderCreateCloudTemplatePicker();
     return;
   }
-  select.innerHTML = ["<option value=\"\">请选择云端镜像</option>", ...rootfsAssetSources(assets).map((source) => {
+  select.innerHTML = [`<option value="">${uiText("请选择云端镜像", "Select a cloud image")}</option>`, ...rootfsAssetSources(assets).map((source) => {
     const options = state.rootfsAssets
       .map((asset, index) => ({ asset, index }))
       .filter(({ asset }) => !isTinyCloudRootfsAsset(asset) && rootfsAssetSource(asset) === source)
@@ -4544,21 +5001,21 @@ function renderCreateCloudSourceHint() {
   if (!hint) return;
   const asset = selectedCreateCloudAsset();
   if (!asset) {
-    hint.textContent = "来源：等待选择";
+    hint.textContent = uiText("来源：等待选择", "Source: awaiting selection");
     hint.removeAttribute("title");
     return;
   }
   const source = rootfsAssetSource(asset);
   const variant = rootfsAssetVariant(asset);
   const architecture = String(asset.architecture || "-").trim() || "-";
-  hint.textContent = `来源：${source}${variant ? ` · ${variant}` : ""}`;
+  hint.textContent = uiText(`来源：${source}${variant ? ` · ${variant}` : ""}`, `Source: ${source}${variant ? ` · ${variant}` : ""}`);
   hint.title = `${rootfsDisplayName(asset)} · ${architecture} · ${source}${variant ? ` · ${variant}` : ""}`;
 }
 
 function handleCreateTemplateControlChange(source) {
   if (source === "cloud") {
     renderCreateCloudSourceHint();
-    $("#createCloudTask").textContent = "选择镜像后直接创建，后台会下载并继续创建容器。";
+    $("#createCloudTask").textContent = uiText("选择镜像后直接创建，后台会下载并继续创建容器。", "After you select an image, it will download in the background and then create the container.");
   }
   renderCreateTemplatePicker();
 }
@@ -4679,14 +5136,16 @@ function sortedTasks() {
 
 function renderTasks() {
   const tasks = sortedTasks().filter(taskShouldRender);
-  renderTaskList("#taskFloatList", tasks, "暂无任务输出");
+  renderTaskList("#taskFloatList", tasks, uiText("暂无任务输出", "No task output"));
   const active = tasks.filter(taskIsActive).length;
   const node = $("#activeTaskCount");
   if (node) node.textContent = active;
   const outputButton = $("#taskOutputBtn");
-  if (outputButton) outputButton.textContent = active ? `任务输出 ${active}` : "任务输出";
+  if (outputButton) outputButton.textContent = active ? uiText(`任务输出 ${active}`, `Task Output ${active}`) : uiText("任务输出", "Task Output");
   const status = $("#taskFloatStatus");
-  if (status) status.textContent = tasks.length ? `${active} 个运行中 / ${tasks.length} 个任务` : "暂无任务";
+  if (status) status.textContent = tasks.length
+    ? uiText(`${active} 个运行中 / ${tasks.length} 个任务`, `${active} running / ${tasks.length} tasks`)
+    : uiText("暂无任务", "No tasks");
   renderTaskOverview(tasks);
   if (!tasks.length) setTaskFloatOpen(false);
 }
@@ -4696,21 +5155,24 @@ function renderTaskOverview(activeTasks = sortedTasks().filter(taskShouldRender)
   const summaryNode = $("#taskOverviewSummary");
   if (summaryNode) {
     const counts = [
-      ["总计", summary.total],
-      ["排队", summary.pending],
-      ["运行中", summary.running],
-      ["已完成", summary.done],
-      ["失败", summary.error],
-      ["已取消", summary.cancelled],
+      [uiText("总计", "Total"), summary.total],
+      [uiText("排队", "Queued"), summary.pending],
+      [uiText("运行中", "Running"), summary.running],
+      [uiText("已完成", "Completed"), summary.done],
+      [uiText("失败", "Failed"), summary.error],
+      [uiText("已取消", "Cancelled"), summary.cancelled],
     ];
     summaryNode.innerHTML = counts.map(([label, count]) => `<div><strong>${Number(count) || 0}</strong><span>${label}</span></div>`).join("");
   }
   const status = $("#taskOverviewStatus");
-  if (status) status.textContent = `本次服务运行累计 ${summary.total || 0} 个任务，当前 ${summary.active || activeTasks.length || 0} 个活跃`;
+  if (status) status.textContent = uiText(
+    `本次服务运行累计 ${summary.total || 0} 个任务，当前 ${summary.active || activeTasks.length || 0} 个活跃`,
+    `${summary.total || 0} tasks this service run; ${summary.active || activeTasks.length || 0} active`
+  );
   const list = $("#taskOverviewList");
   if (!list) return;
   if (!activeTasks.length) {
-    list.innerHTML = '<div class="empty-state">暂无运行中的后台任务</div>';
+    list.innerHTML = `<div class="empty-state">${uiText("暂无运行中的后台任务", "No active background tasks")}</div>`;
     return;
   }
   list.innerHTML = activeTasks.map((task) => {
@@ -4729,8 +5191,8 @@ function renderTaskList(selector, tasks, emptyText) {
   list.innerHTML = tasks.map((task) => {
     const pct = task.percent || 0;
     const status = task.status || "pending";
-    const link = task.url ? `<button class="text-btn" data-download-url="${escapeHTML(task.url)}" data-download-name="${escapeHTML(task.name || task.kind || task.id)}">下载</button>` : "";
-    const backupNote = task.willStopContainer ? `<span>${task.stoppedContainer ? "已停止容器" : "将停止容器"}${task.restoredContainer ? " · 已恢复启动" : task.restoreError ? " · 恢复失败" : task.restoreAfterBackup ? " · 将恢复启动" : ""}</span>` : "";
+    const link = task.url ? `<button class="text-btn" data-download-url="${escapeHTML(task.url)}" data-download-name="${escapeHTML(task.name || task.kind || task.id)}">${uiText("下载", "Download")}</button>` : "";
+    const backupNote = task.willStopContainer ? `<span>${task.stoppedContainer ? uiText("已停止容器", "Container stopped") : uiText("将停止容器", "Container will stop")}${task.restoredContainer ? uiText(" · 已恢复启动", " · restarted") : task.restoreError ? uiText(" · 恢复失败", " · restart failed") : task.restoreAfterBackup ? uiText(" · 将恢复启动", " · will restart") : ""}</span>` : "";
     const logLines = Array.isArray(task.log) ? task.log.slice(-80).join("\n") : (task.output || "");
     const log = logLines ? `<pre class="task-log">${escapeHTML(logLines)}</pre>` : "";
     return `<div class="task-item"><div><strong>${escapeHTML(task.name || task.id)}</strong><span>${escapeHTML(taskLabel(task.kind))} · ${escapeHTML(status)} · ${pct}%</span>${backupNote}${task.error ? `<div class="task-error">${escapeHTML(task.error)}</div>` : ""}${task.restoreError ? `<div class="task-error">${escapeHTML(task.restoreError)}</div>` : ""}${task.path ? `<span class="mono muted">${escapeHTML(task.path)}</span>` : ""}${log}</div><progress max="100" value="${pct}"></progress>${link}</div>`;
@@ -4768,11 +5230,11 @@ function filenameFromDisposition(value) {
 }
 
 async function deleteLocalRootfs(path, name) {
-  if (!confirm(`删除 ${name || path}？此操作会移除该镜像/备份文件。`)) return;
+  if (!confirm(uiText(`删除 ${name || path}？此操作会移除该镜像/备份文件。`, `Delete ${name || path}? This removes the image or backup file.`))) return;
   setBusy(true);
   try {
     await api(`/api/rootfs/local/delete?path=${encodeURIComponent(path)}`, { method: "DELETE" });
-    toast("已删除镜像文件");
+    toast(uiText("已删除镜像文件", "Image file deleted"));
     await loadLocalRootfs();
   } catch (err) {
     toast(err.message);
@@ -4787,8 +5249,8 @@ async function openConfigModal(name) {
     const data = await api(`/api/containers/${encodeURIComponent(name)}`);
     state.configTarget = data.name || name;
     $("#configName").value = state.configTarget;
-    $("#configTitle").textContent = `修改运行配置 · ${state.configTarget}`;
-    $("#configSubtitle").textContent = data.running ? "保存时会先停止容器，并按选项恢复启动" : "保存后会写入 container.config";
+    $("#configTitle").textContent = uiText(`修改运行配置 · ${state.configTarget}`, `Edit Runtime Configuration · ${state.configTarget}`);
+    $("#configSubtitle").textContent = data.running ? uiText("保存时会先停止容器，并按选项恢复启动", "The container will stop before saving and restart according to the selected option") : uiText("保存后会写入 container.config", "Changes will be written to container.config when saved");
     $("#configHostname").value = data.hostname || "";
     $("#configNetMode").value = data.netMode || "nat";
     setStaticNATIP("config", data.staticNatIp || data.natIp || "");
@@ -4884,7 +5346,7 @@ function waitForConfigRestart(name, timeoutMs = 90000) {
       await new Promise((resolve) => setTimeout(resolve, 900));
     }
     const suffix = lastError?.message ? `：${lastError.message}` : "";
-    throw new Error(`配置已保存，但容器未在 90 秒内恢复启动${suffix}`);
+    throw new Error(uiText(`配置已保存，但容器未在 90 秒内恢复启动${suffix}`, `Configuration was saved, but the container did not restart within 90 seconds${suffix}`));
   };
   return poll();
 }
@@ -4895,7 +5357,7 @@ async function submitConfig(event) {
   const name = $("#configName").value || state.configTarget;
   if (!name) return;
   const running = state.containers.find((container) => container.name === name)?.running || state.selectedDetail?.name === name && state.selectedDetail?.running;
-  if (running && !confirm(`保存 ${name} 的配置会先停止当前容器，完成后按选项恢复启动。继续？`)) return;
+  if (running && !confirm(uiText(`保存 ${name} 的配置会先停止当前容器，完成后按选项恢复启动。继续？`, `Saving ${name} will stop the current container and restart it according to the selected option. Continue?`))) return;
   const netMode = $("#configNetMode").value;
   const payload = {
     hostname: $("#configHostname").value.trim(),
@@ -4933,33 +5395,33 @@ async function submitConfig(event) {
   };
   let configSaved = false;
   setConfigSaveInProgress(true);
-  setConfigSaveStatus(running && payload.restoreAfterUpdate ? "正在保存配置并等待容器恢复启动..." : "正在保存配置...");
+  setConfigSaveStatus(running && payload.restoreAfterUpdate ? uiText("正在保存配置并等待容器恢复启动...", "Saving configuration and waiting for the container to restart...") : uiText("正在保存配置...", "Saving configuration..."));
   setBusy(true);
   try {
     const data = await api(`/api/containers/${encodeURIComponent(name)}/config`, { method: "PATCH", body: JSON.stringify(payload) });
     configSaved = true;
     if (data.restoreError) {
-      setConfigSaveStatus("配置已保存，但容器恢复启动失败。请从容器详情手动启动。");
-      toast(`恢复启动失败：${data.restoreError}`);
+      setConfigSaveStatus(uiText("配置已保存，但容器恢复启动失败。请从容器详情手动启动。", "Configuration was saved, but the container failed to restart. Start it manually from container details."));
+      toast(uiText(`恢复启动失败：${data.restoreError}`, `Restart failed: ${data.restoreError}`));
       return;
     }
     if (data.stopped && payload.restoreAfterUpdate) {
       if (!data.restarted) {
-        setConfigSaveStatus("配置已保存，但未能确认容器已恢复启动。");
-        toast("配置已保存，但容器未恢复启动");
+        setConfigSaveStatus(uiText("配置已保存，但未能确认容器已恢复启动。", "Configuration was saved, but the container restart could not be confirmed."));
+        toast(uiText("配置已保存，但容器未恢复启动", "Configuration was saved, but the container did not restart"));
         return;
       }
-      setConfigSaveStatus("配置已保存，正在确认容器已恢复启动...");
+      setConfigSaveStatus(uiText("配置已保存，正在确认容器已恢复启动...", "Configuration saved. Confirming that the container restarted..."));
       await waitForConfigRestart(name);
     }
     await refreshAll();
     if (state.selected === name) await inspect(name, false, false);
     hideConfigModal(true);
-    toast(data.restarted ? "配置已保存并恢复启动" : "配置已保存");
+    toast(data.restarted ? uiText("配置已保存并恢复启动", "Configuration saved and container restarted") : uiText("配置已保存", "Configuration saved"));
   } catch (err) {
     const message = configSaved
-      ? `配置已保存，但无法确认容器已恢复启动：${err.message}`
-      : `保存未完成：${err.message}`;
+      ? uiText(`配置已保存，但无法确认容器已恢复启动：${err.message}`, `Configuration was saved, but the container restart could not be confirmed: ${err.message}`)
+      : uiText(`保存未完成：${err.message}`, `Save did not complete: ${err.message}`);
     setConfigSaveStatus(message);
     toast(message);
   } finally {
@@ -4971,13 +5433,13 @@ async function submitConfig(event) {
 async function exportContainer(name, asTemplate) {
   const action = asTemplate ? "template" : "export";
   const container = state.containers.find((item) => item.name === name) || (state.selectedDetail?.name === name ? state.selectedDetail : null);
-  if (container?.running && !confirm(`${asTemplate ? "转换为模板" : "备份"}会先停止容器 ${name}，完成或失败后会尽量恢复启动。继续？`)) return;
+  if (container?.running && !confirm(uiText(`${asTemplate ? "转换为模板" : "备份"}会先停止容器 ${name}，完成或失败后会尽量恢复启动。继续？`, `${asTemplate ? "Converting to a template" : "Backing up"} will stop container ${name} and attempt to restore it after completion or failure. Continue?`))) return;
   setBusy(true);
   try {
     const data = await api(`/api/containers/${encodeURIComponent(name)}/${action}`, { method: "POST" });
     trackTask(data.taskId);
     openTaskPanel();
-    toast(data.willStopContainer ? "任务已开始：会停止容器并在结束后恢复" : (asTemplate ? "已开始转换为模板" : "已开始打包备份"));
+    toast(data.willStopContainer ? uiText("任务已开始：会停止容器并在结束后恢复", "Task started: the container will stop and be restored afterward") : (asTemplate ? uiText("已开始转换为模板", "Template conversion started") : uiText("已开始打包备份", "Backup packaging started")));
   } catch (err) {
     toast(err.message);
   } finally {
@@ -5000,6 +5462,13 @@ function renderNetworkSettings() {
   const data = state.networkSettings || {};
   updateNATPrefixLabels();
   if ($("#natGatewayIP")) $("#natGatewayIP").value = data.natGatewayIP || "172.28.0.1";
+  const upstreamMode = data.upstreamMode === "core-auto-detect" || !data.upstreamMode
+    ? t("network.autoDetected")
+    : String(data.upstreamMode);
+  ["#natUpstreamMode", "#settingsNatUpstreamMode"].forEach((selector) => {
+    const input = $(selector);
+    if (input) input.value = upstreamMode;
+  });
 }
 
 function renderNetwork() {
@@ -5011,14 +5480,14 @@ function renderNetwork() {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
-    summary.innerHTML = ["host", "nat", "gateway", "none", "unknown"].filter((key) => counts[key]).map((key) => `<div class="metric"><span class="metric-label">${escapeHTML(key)}</span><strong>${counts[key]}</strong></div>`).join("") || `<div class="metric"><span class="metric-label">网络模式</span><strong>0</strong></div>`;
+    summary.innerHTML = ["host", "nat", "gateway", "none", "unknown"].filter((key) => counts[key]).map((key) => `<div class="metric"><span class="metric-label">${escapeHTML(key)}</span><strong>${counts[key]}</strong></div>`).join("") || `<div class="metric"><span class="metric-label">${uiText("网络模式", "Network Modes")}</span><strong>0</strong></div>`;
   }
   if (!rows) return;
   if (!state.containers.length) {
-    rows.innerHTML = `<tr><td colspan="6" class="empty">暂无容器</td></tr>`;
+    rows.innerHTML = `<tr><td colspan="6" class="empty">${uiText("暂无容器", "No containers")}</td></tr>`;
     return;
   }
-  rows.innerHTML = state.containers.map((container) => `<tr><td><strong>${escapeHTML(container.name)}</strong></td><td>${statusBadge(container)}</td><td>${escapeHTML(container.netMode || "-")}</td><td class="mono">${escapeHTML(container.natIp || "-")}</td><td class="mono path-cell">${escapeHTML(portText(container.ports))}</td><td class="mono">${escapeHTML(container.dnsServers || "详情中查看")}</td></tr>`).join("");
+  rows.innerHTML = state.containers.map((container) => `<tr><td><strong>${escapeHTML(container.name)}</strong></td><td>${statusBadge(container)}</td><td>${escapeHTML(container.netMode || "-")}</td><td class="mono">${escapeHTML(container.natIp || "-")}</td><td class="mono path-cell">${escapeHTML(portText(container.ports))}</td><td class="mono">${escapeHTML(container.dnsServers || uiText("详情中查看", "See details"))}</td></tr>`).join("");
 }
 
 function renderSecurity() {
@@ -5027,39 +5496,39 @@ function renderSecurity() {
   const status = state.status || {};
   if (summary) {
     summary.innerHTML = [
-      ["授权", status.authEnabled ? "已启用" : "未启用"],
-      ["监听模式", status.mode || "-"],
-      ["镜像下载 TLS 校验", status.rootfsSkipTLSVerify ? "已跳过" : "启用"],
+      [uiText("授权", "Authorization"), status.authEnabled ? uiText("已启用", "Enabled") : uiText("未启用", "Disabled")],
+      [uiText("监听模式", "Listen Mode"), status.mode || "-"],
+      [uiText("镜像下载 TLS 校验", "Image Download TLS Verification"), status.rootfsSkipTLSVerify ? uiText("已跳过", "Skipped") : uiText("启用", "Enabled")],
       ["WebSocket Origin", "同源或本机回环"],
-      ["socketd", status.socketdEnabled ? "启用" : "禁用"],
+      ["socketd", status.socketdEnabled ? uiText("启用", "Enabled") : uiText("禁用", "Disabled")],
     ].map(([k, v]) => `<div class="summary-row"><span>${k}</span><strong>${escapeHTML(v)}</strong></div>`).join("");
   }
   if (!findings) return;
   const items = [];
-  if (!status.authEnabled) items.push(["高", "WebUI 未启用 authToken", "public 或局域网访问时必须配置授权密钥"]);
-  if (status.mode === "public" && !status.authEnabled) items.push(["高", "public 模式未启用授权", "外部网络可直接访问 API"]);
-  if (status.rootfsSkipTLSVerify) items.push(["中", "镜像下载跳过 TLS 校验", "仅在 Android 证书链不可用时临时使用"]);
+  if (!status.authEnabled) items.push([uiText("高", "High"), uiText("WebUI 未启用 authToken", "WebUI authToken is not enabled"), uiText("public 或局域网访问时必须配置授权密钥", "Configure an authorization token for public or LAN access")]);
+  if (status.mode === "public" && !status.authEnabled) items.push([uiText("高", "High"), uiText("public 模式未启用授权", "Public mode has no authorization"), uiText("外部网络可直接访问 API", "External networks can access the API directly")]);
+  if (status.rootfsSkipTLSVerify) items.push([uiText("中", "Medium"), uiText("镜像下载跳过 TLS 校验", "Image downloads skip TLS verification"), uiText("仅在 Android 证书链不可用时临时使用", "Use only temporarily when Android certificate chains are unavailable")]);
   state.containers.forEach((container) => {
-    if ((container.ports || []).length) items.push(["中", `${container.name} 暴露端口`, portText(container.ports)]);
-    if (container.netMode === "host") items.push(["低", `${container.name} 使用 host 网络`, "容器与设备共享网络命名空间"]);
+    if ((container.ports || []).length) items.push([uiText("中", "Medium"), uiText(`${container.name} 暴露端口`, `${container.name} exposes ports`), portText(container.ports)]);
+    if (container.netMode === "host") items.push([uiText("低", "Low"), uiText(`${container.name} 使用 host 网络`, `${container.name} uses host networking`), uiText("容器与设备共享网络命名空间", "The container shares the device network namespace")]);
   });
   const detail = state.selectedDetail;
   if (detail) {
-    if (detail.selinuxPermissive) items.push(["高", `${detail.name} SELinux 宽容`, "降低强制访问控制保护"]);
-    if (detail.hwAccess) items.push(["中", `${detail.name} 开启硬件访问`, "确认容器内进程可信"]);
-    if (supportsAndroidStorage() && detail.androidStorage) items.push(["中", `${detail.name} 挂载 Android 存储`, "注意外部存储数据暴露范围"]);
-    safeArray(detail.binds).filter((bind) => !bind.readOnly).forEach((bind) => items.push(["中", `${detail.name} 读写绑定挂载`, `${bind.source} → ${bind.destination}`]));
+    if (detail.selinuxPermissive) items.push([uiText("高", "High"), uiText(`${detail.name} SELinux 宽容`, `${detail.name} is SELinux permissive`), uiText("降低强制访问控制保护", "This reduces mandatory access control protection")]);
+    if (detail.hwAccess) items.push([uiText("中", "Medium"), uiText(`${detail.name} 开启硬件访问`, `${detail.name} has hardware access`), uiText("确认容器内进程可信", "Confirm that processes in the container are trusted")]);
+    if (supportsAndroidStorage() && detail.androidStorage) items.push([uiText("中", "Medium"), uiText(`${detail.name} 挂载 Android 存储`, `${detail.name} mounts Android storage`), uiText("注意外部存储数据暴露范围", "Review external storage data exposure")]);
+    safeArray(detail.binds).filter((bind) => !bind.readOnly).forEach((bind) => items.push([uiText("中", "Medium"), uiText(`${detail.name} 读写绑定挂载`, `${detail.name} has a read-write bind mount`), `${bind.source} → ${bind.destination}`]));
   }
   if (!items.length) {
-    findings.innerHTML = `<div class="empty-state">未发现明显风险</div>`;
+    findings.innerHTML = `<div class="empty-state">${uiText("未发现明显风险", "No obvious risks found")}</div>`;
     return;
   }
-  findings.innerHTML = items.map(([level, title, desc]) => `<div class="finding"><span class="severity ${level === "高" ? "high" : level === "中" ? "medium" : "low"}">${level}</span><div><strong>${escapeHTML(title)}</strong><p>${escapeHTML(desc)}</p></div></div>`).join("");
+  findings.innerHTML = items.map(([level, title, desc]) => `<div class="finding"><span class="severity ${level === uiText("高", "High") ? "high" : level === uiText("中", "Medium") ? "medium" : "low"}">${level}</span><div><strong>${escapeHTML(title)}</strong><p>${escapeHTML(desc)}</p></div></div>`).join("");
 }
 
 function renderEvents() {
-  renderEventList("#eventsList", state.events, "暂无事件");
-  renderEventList("#overviewEvents", state.events.slice(-5), "暂无事件");
+  renderEventList("#eventsList", state.events, uiText("暂无事件", "No events"));
+  renderEventList("#overviewEvents", state.events.slice(-5), uiText("暂无事件", "No events"));
 }
 
 function renderEventList(selector, events, emptyText) {
@@ -5069,12 +5538,12 @@ function renderEventList(selector, events, emptyText) {
     node.innerHTML = `<div class="empty-state">${escapeHTML(emptyText)}</div>`;
     return;
   }
-  node.innerHTML = events.slice().reverse().map((event) => `<div class="event"><div class="event-time">${event.time ? new Date(event.time * 1000).toLocaleTimeString() : "-"}</div><div class="event-main"><strong>${escapeHTML(event.action || event.type || "-")}</strong><span>${escapeHTML(event.actorName || event.actorId || "-")}</span></div></div>`).join("");
+  node.innerHTML = events.slice().reverse().map((event) => `<div class="event"><div class="event-time">${event.time ? new Date(event.time * 1000).toLocaleTimeString(uiLocale()) : "-"}</div><div class="event-main"><strong>${escapeHTML(event.action || event.type || "-")}</strong><span>${escapeHTML(event.actorName || event.actorId || "-")}</span></div></div>`).join("");
 }
 
 async function loadBatteryPower() {
   if (!batteryMonitoringEnabled()) {
-    const data = { message: "电池监控已关闭" };
+    const data = { message: uiText("电池监控已关闭", "Battery monitoring is disabled") };
     state.batteryPower = data;
     renderBatteryPower(data);
     return data;
@@ -5101,18 +5570,18 @@ function renderBatteryPower(data = state.batteryPower) {
   const chart = $("#batteryPowerChart");
   if (!summary || !batteryBins || !inputBins || !chart) return;
   if (!data || data.message) {
-    summary.innerHTML = `<div class="empty-state">${escapeHTML(data?.message || "暂无电池功率样本")}</div>`;
+    summary.innerHTML = `<div class="empty-state">${escapeHTML(data?.message || uiText("暂无电池功率样本", "No battery power samples"))}</div>`;
   } else {
     summary.innerHTML = [
-      ["历史样本", `${data.sampleCount || 0}`],
-      ["放电样本", data.dischargeSampleCount ? `${data.dischargeSampleCount} 条` : "-"],
-      ["平均放电", data.dischargeSampleCount ? `${fmtCompactNumber(data.avgDischargeW, 2)} W` : "-"],
-      ["峰值放电", data.maxDischargeW ? `${fmtCompactNumber(data.maxDischargeW, 2)} W` : "-"],
-      ["充电样本", data.chargeSampleCount ? `${data.chargeSampleCount} 条` : "-"],
-      ["平均充电", data.chargeSampleCount ? `${fmtCompactNumber(data.avgChargeW, 2)} W` : "-"],
-      ["峰值充电", data.maxChargeW ? `${fmtCompactNumber(data.maxChargeW, 2)} W` : "-"],
-      ["平均输入", data.inputSampleCount ? `${fmtCompactNumber(data.avgInputW, 2)} W` : "-"],
-      ["峰值输入", data.maxInputW ? `${fmtCompactNumber(data.maxInputW, 2)} W` : "-"],
+      [uiText("历史样本", "Historical Samples"), `${data.sampleCount || 0}`],
+      [uiText("放电样本", "Discharge Samples"), data.dischargeSampleCount ? uiText(`${data.dischargeSampleCount} 条`, `${data.dischargeSampleCount}`) : "-"],
+      [uiText("平均放电", "Average Discharge"), data.dischargeSampleCount ? `${fmtCompactNumber(data.avgDischargeW, 2)} W` : "-"],
+      [uiText("峰值放电", "Peak Discharge"), data.maxDischargeW ? `${fmtCompactNumber(data.maxDischargeW, 2)} W` : "-"],
+      [uiText("充电样本", "Charge Samples"), data.chargeSampleCount ? uiText(`${data.chargeSampleCount} 条`, `${data.chargeSampleCount}`) : "-"],
+      [uiText("平均充电", "Average Charge"), data.chargeSampleCount ? `${fmtCompactNumber(data.avgChargeW, 2)} W` : "-"],
+      [uiText("峰值充电", "Peak Charge"), data.maxChargeW ? `${fmtCompactNumber(data.maxChargeW, 2)} W` : "-"],
+      [uiText("平均输入", "Average Input"), data.inputSampleCount ? `${fmtCompactNumber(data.avgInputW, 2)} W` : "-"],
+      [uiText("峰值输入", "Peak Input"), data.maxInputW ? `${fmtCompactNumber(data.maxInputW, 2)} W` : "-"],
     ].map(([label, value]) => `<div class="metric small"><span class="metric-label">${escapeHTML(label)}</span><strong>${escapeHTML(value)}</strong></div>`).join("");
   }
   batteryBins.innerHTML = renderPowerBins(data?.batteryBins || [], data?.dischargeSampleCount || 0);
@@ -5138,7 +5607,7 @@ function renderPowerChart(samples) {
     .filter((sample) => sample.hasInput && Number.isFinite(sample.inputW))
     .map((sample) => Math.max(0, sample.inputW));
   const magnitude = Math.max(0, ...batteryValues.map((value) => Math.abs(value)), ...inputValues);
-  if (!rows.length || magnitude <= 0) return `<div class="empty-state">暂无曲线数据</div>`;
+  if (!rows.length || magnitude <= 0) return `<div class="empty-state">${uiText("暂无曲线数据", "No chart data")}</div>`;
 
   const width = 720;
   const height = 260;
@@ -5163,7 +5632,7 @@ function renderPowerChart(samples) {
     .filter(Boolean);
   const batterySeries = buildSeries((sample) => sample.hasBattery ? sample.batteryW : NaN);
   const inputSeries = buildSeries((sample) => sample.hasInput ? Math.max(0, sample.inputW) : NaN);
-  if (batterySeries.length + inputSeries.length <= 0) return `<div class="empty-state">暂无曲线数据</div>`;
+  if (batterySeries.length + inputSeries.length <= 0) return `<div class="empty-state">${uiText("暂无曲线数据", "No chart data")}</div>`;
 
   const linePath = (series) => series.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" ");
   const marker = (series, cls) => {
@@ -5182,13 +5651,13 @@ function renderPowerChart(samples) {
   const batteryLatest = batterySeries[batterySeries.length - 1]?.value;
   const inputLatest = inputSeries[inputSeries.length - 1]?.value;
   const latest = [
-    Number.isFinite(batteryLatest) ? `电池 ${fmtCompactNumber(batteryLatest, 2)} W` : "",
-    Number.isFinite(inputLatest) ? `输入 ${fmtCompactNumber(inputLatest, 2)} W` : "",
+    Number.isFinite(batteryLatest) ? uiText(`电池 ${fmtCompactNumber(batteryLatest, 2)} W`, `Battery ${fmtCompactNumber(batteryLatest, 2)} W`) : "",
+    Number.isFinite(inputLatest) ? uiText(`输入 ${fmtCompactNumber(inputLatest, 2)} W`, `Input ${fmtCompactNumber(inputLatest, 2)} W`) : "",
   ].filter(Boolean).join(" / ");
   const batteryPath = linePath(batterySeries);
   const inputPath = linePath(inputSeries);
-  return `<div class="power-chart-head"><div class="power-chart-legend"><span class="battery">电池净功率（正：充电，负：放电）</span><span class="input">外部输入</span></div><strong>${escapeHTML(latest || "-")}</strong></div>
-    <svg class="power-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="电池净功率曲线，正值表示充电，负值表示放电；同时显示外部输入功率">
+  return `<div class="power-chart-head"><div class="power-chart-legend"><span class="battery">${uiText("电池净功率（正：充电，负：放电）", "Battery net power (positive: charging, negative: discharging)")}</span><span class="input">${uiText("外部输入", "External Input")}</span></div><strong>${escapeHTML(latest || "-")}</strong></div>
+    <svg class="power-chart-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${uiText("电池净功率曲线，正值表示充电，负值表示放电；同时显示外部输入功率", "Battery net power chart. Positive values charge and negative values discharge; external input is also shown.")}">
       ${grid}
       <line class="power-chart-axis" x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${height - pad.bottom}"></line>
       <line class="power-chart-axis" x1="${pad.left}" y1="${height - pad.bottom}" x2="${width - pad.right}" y2="${height - pad.bottom}"></line>
@@ -5212,21 +5681,20 @@ function niceChartMax(value) {
 
 function formatChartTime(seconds) {
   const date = new Date(seconds * 1000);
-  const pad = (value) => String(value).padStart(2, "0");
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return new Intl.DateTimeFormat(uiLocale(), { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 
 function renderPowerBins(bins, total) {
-  if (!bins.length || total <= 0) return `<div class="empty-state">暂无区间数据</div>`;
+  if (!bins.length || total <= 0) return `<div class="empty-state">${uiText("暂无区间数据", "No range data")}</div>`;
   return bins.map((bin) => {
     const percent = Math.max(0, Math.min(100, Number(bin.percent || 0)));
-    return `<div class="power-bin"><div class="power-bin-head"><span>${escapeHTML(bin.label)}</span><strong>${bin.count || 0} 次 · ${fmtCompactNumber(percent, 1)}%</strong></div><div class="power-bin-track"><span style="width:${percent}%"></span></div></div>`;
+    return `<div class="power-bin"><div class="power-bin-head"><span>${escapeHTML(bin.label)}</span><strong>${uiText(`${bin.count || 0} 次 · ${fmtCompactNumber(percent, 1)}%`, `${bin.count || 0} · ${fmtCompactNumber(percent, 1)}%`)}</strong></div><div class="power-bin-track"><span style="width:${percent}%"></span></div></div>`;
   }).join("");
 }
 
 function switchView(view, options = {}) {
   if (view === "battery" && !batteryMonitoringEnabled()) {
-    if (!options.silentBatteryRedirect) toast("电池监控已在系统设置中关闭");
+    if (!options.silentBatteryRedirect) toast(t("battery.monitoringDisabledRedirect"));
     view = "overview";
   }
   if (!options.keepMenuOpen) setMenuOpen(false);
@@ -5239,20 +5707,20 @@ function switchView(view, options = {}) {
   $$(".view-panel").forEach((panel) => panel.classList.remove("active"));
   $(`#${view}View`)?.classList.add("active");
   const titles = {
-    overview: ["概览", "系统、资源与网络运行状态"],
-    containers: ["容器管理", "列表、筛选和生命周期操作"],
-    detail: ["详细参数", "容器配置、网络、挂载、环境变量和备份操作"],
-    terminal: ["交互终端", "进入运行中的容器 shell"],
-    rootfs: ["镜像管理", ""],
-    network: ["网络管理", "NAT 默认配置、网络模式和端口转发总览"],
-    security: ["安全", "授权、TLS、端口和容器敏感能力摘要"],
-    diagnostics: ["诊断", "主机路径、CLI 输出和 socketd 事件"],
-    battery: ["电池监控", "实时供电状态、库仑计历史和功率区间"],
-    settings: ["系统设置", "WebUI 配置、路径、镜像仓库和 Android 集成"],
+    overview: ["view.overview.title", "view.overview.subtitle"],
+    containers: ["view.containers.title", "view.containers.subtitle"],
+    detail: ["view.detail.title", "view.detail.subtitle"],
+    terminal: ["view.terminal.title", "view.terminal.subtitle"],
+    rootfs: ["view.rootfs.title", ""],
+    network: ["view.network.title", "view.network.subtitle"],
+    security: ["view.security.title", "view.security.subtitle"],
+    diagnostics: ["view.diagnostics.title", "view.diagnostics.subtitle"],
+    battery: ["view.battery.title", "view.battery.subtitle"],
+    settings: ["view.settings.title", "view.settings.subtitle"],
   };
-  const [title, subtitle] = titles[view] || ["Droidspaces", ""];
-  $("#viewTitle").textContent = title;
-  $("#viewSubtitle").textContent = subtitle;
+  const [titleKey, subtitleKey] = titles[view] || ["document.title", ""];
+  $("#viewTitle").textContent = t(titleKey);
+  $("#viewSubtitle").textContent = subtitleKey ? t(subtitleKey) : "";
   if (view === "rootfs" && !options.skipRootfsLoad) {
     refreshCurrentRootfsTab().catch((err) => toast(err.message));
   }
@@ -5346,7 +5814,8 @@ function setPrivilegedModeValue(prefix, value) {
 }
 
 function confirmPrivilegedMode() {
-  return window.prompt(`开启特权模式前请输入：${PRIVILEGED_ACK}`) === PRIVILEGED_ACK;
+  const acknowledgement = t("security.privilegedAcknowledgement");
+  return window.prompt(t("security.privilegedPrompt", { acknowledgement })) === acknowledgement;
 }
 
 function handlePrivilegedModeChange(prefix, changedInput) {
@@ -5354,7 +5823,7 @@ function handlePrivilegedModeChange(prefix, changedInput) {
   const alreadyEnabled = inputs.some((input) => input !== changedInput && input.checked);
   if (changedInput?.checked && !alreadyEnabled && !confirmPrivilegedMode()) {
     changedInput.checked = false;
-    toast(`需要输入：${PRIVILEGED_ACK}`);
+    toast(t("security.privilegedAcknowledgementRequired", { acknowledgement: t("security.privilegedAcknowledgement") }));
     updateDeadlockControls(prefix);
     updateUserNamespaceControls(prefix);
     return;
@@ -5396,21 +5865,21 @@ function updateUserNamespaceControls(prefix) {
 
 async function downloadSelectedCloudForCreate() {
   const asset = selectedCreateCloudAsset();
-  if (!asset) { toast("请先选择云端镜像"); return; }
+  if (!asset) { toast(uiText("请先选择云端镜像", "Select a cloud image first")); return; }
   const button = $("#createCloudDownloadBtn");
-  const restoreButton = setDownloadSubmissionState(button, "正在提交...");
-  $("#createCloudTask").textContent = "正在校验镜像来源并提交预下载任务...";
+  const restoreButton = setDownloadSubmissionState(button, uiText("正在提交...", "Submitting..."));
+  $("#createCloudTask").textContent = uiText("正在校验镜像来源并提交预下载任务...", "Verifying the image source and submitting the pre-download task...");
   try {
     const data = await api("/api/rootfs/download", { method: "POST", body: JSON.stringify(asset) });
     trackTask(data.taskId, (task) => {
-      $("#createCloudTask").textContent = `已下载到本地：${task.path || ""}。可切换到本地模板后创建。`;
+      $("#createCloudTask").textContent = uiText(`已下载到本地：${task.path || ""}。可切换到本地模板后创建。`, `Downloaded locally: ${task.path || ""}. Switch to Local Template to create the container.`);
     });
     openTaskPanel();
     $("#createCloudTask").textContent = data.shared
-      ? "已加入正在进行的预下载任务。"
-      : "预下载任务已提交；也可以直接创建，让后台自动下载并创建。";
+      ? uiText("已加入正在进行的预下载任务。", "Joined the pre-download task already in progress.")
+      : uiText("预下载任务已提交；也可以直接创建，让后台自动下载并创建。", "Pre-download task submitted. You can also create directly and let the backend download the image automatically.");
   } catch (err) {
-    $("#createCloudTask").textContent = `预下载提交失败：${err.message}`;
+    $("#createCloudTask").textContent = uiText(`预下载提交失败：${err.message}`, `Pre-download submission failed: ${err.message}`);
     throw err;
   } finally {
     restoreButton();
@@ -5472,7 +5941,7 @@ function collapseMenuGroups() {
 
 async function runCLI(command) {
   setBusy(true);
-  $("#cliOutput").textContent = "执行中";
+  $("#cliOutput").textContent = uiText("执行中", "Running");
   try {
     const data = await api("/api/cli", { method: "POST", body: JSON.stringify({ command }) });
     $("#cliOutput").textContent = `$ droidspaces ${data.command}\nexit=${data.exitCode}\n\n${data.output || ""}`;
@@ -5632,7 +6101,7 @@ document.addEventListener("click", (event) => {
   }
 
   if (button.dataset.deleteRootfs) {
-    deleteLocalRootfs(button.dataset.deleteRootfs, button.dataset.deleteRootfsName || "镜像");
+    deleteLocalRootfs(button.dataset.deleteRootfs, button.dataset.deleteRootfsName || uiText("镜像", "Image"));
     return;
   }
 
@@ -5684,7 +6153,7 @@ document.addEventListener("click", (event) => {
   }
   if (button.dataset.detailLoad) {
     const name = decodeURIComponent(button.dataset.name || state.selected || "");
-    if (!name) { toast("请先选择容器"); return; }
+    if (!name) { toast(uiText("请先选择容器", "Select a container first")); return; }
     if (button.dataset.detailLoad === "users") loadDetailUsers(name).catch((err) => toast(err.message));
     else if (button.dataset.detailLoad === "services") loadDetailServices(name).catch((err) => toast(err.message));
     else if (button.dataset.detailLoad === "diagnostics") loadDetailDiagnostics().catch((err) => toast(err.message));
@@ -5694,7 +6163,7 @@ document.addEventListener("click", (event) => {
     const name = decodeURIComponent(button.dataset.name || state.selected || "");
     setBusy(true);
     postServiceAction(name, button.dataset.serviceManager, button.dataset.serviceName, button.dataset.serviceAction)
-      .then((data) => { toast("服务操作已提交"); renderDiagnosticsOutput(data, "#detailServiceOutput"); return loadDetailServices(name); })
+      .then((data) => { toast(uiText("服务操作已提交", "Service action submitted")); renderDiagnosticsOutput(data, "#detailServiceOutput"); return loadDetailServices(name); })
       .catch((err) => toast(err.message))
       .finally(() => setBusy(false));
     return;
@@ -5749,7 +6218,7 @@ document.addEventListener("change", (event) => {
   const payload = { [input.dataset.diagToggle]: input.checked };
   setBusy(true);
   saveDiagnosticsSettings(payload)
-    .then((data) => { if (inSettings) { state.systemSettings.integration = data; renderSettingsIntegration(data); } else renderDiagnosticsSettings(data, selector); toast("诊断设置已保存"); })
+    .then((data) => { if (inSettings) { state.systemSettings.integration = data; renderSettingsIntegration(data); } else renderDiagnosticsSettings(data, selector); toast(uiText("诊断设置已保存", "Diagnostic settings saved")); })
     .catch((err) => { input.checked = !input.checked; if (inSettings) { const node = $("#settingsIntegrationStatus"); if (node) node.textContent = err.message; } else renderDiagnosticsOutput(err.message, selector); toast(err.message); })
     .finally(() => setBusy(false));
 });
@@ -5876,12 +6345,15 @@ function bindUI() {
   privilegedModeInputs("create").forEach((input) => input.addEventListener("change", () => handlePrivilegedModeChange("create", input)));
   $("#configNetMode").addEventListener("change", updateNetworkModeFields);
   $("#settingsMode")?.addEventListener("change", updateSettingsModeUI);
+  $("#settingsUILanguage")?.addEventListener("change", (event) => {
+    updateSettingsUILanguage(event.currentTarget.value).catch((err) => toast(err.message));
+  });
   $("#settingsBatteryMonitoringEnabled")?.addEventListener("change", updateBatterySettingsFormUI);
   $("#settingsNjuMirrorEnabled")?.addEventListener("change", (event) => {
-    const enabled = event.currentTarget.checked;
-    const repositories = setLinuxContainersMirrorRepository(collectSettingsRepositories(), enabled, true);
-    renderSettingsRepositories(repositories);
-    toast(enabled ? "已切换为南京大学 lxc-image 下载源，保存设置后生效" : "已切换为 lxc-image 官方下载源，保存设置后生效");
+  const enabled = event.currentTarget.checked;
+  const repositories = setLinuxContainersMirrorRepository(collectSettingsRepositories(), enabled, true);
+  renderSettingsRepositories(repositories);
+  toast(enabled ? uiText("已切换为南京大学 lxc-image 下载源，保存设置后生效", "Switched to the Nanjing University lxc-image source. Save settings to apply it.") : uiText("已切换为 lxc-image 官方下载源，保存设置后生效", "Switched to the official lxc-image source. Save settings to apply it."));
   });
   $("#configTermuxX11")?.addEventListener("change", () => updateGraphicsFlagFields("config"));
   $("#configVirgl")?.addEventListener("change", () => updateGraphicsFlagFields("config"));
@@ -5921,11 +6393,11 @@ function bindUI() {
   });
   $("#filterInput").addEventListener("input", renderContainers);
   $("#detailRefreshBtn").addEventListener("click", () => {
-    if (!state.selected) { toast("请先选择容器"); return; }
+    if (!state.selected) { toast(uiText("请先选择容器", "Select a container first")); return; }
     inspect(state.selected, true, false).catch((err) => toast(err.message));
   });
   $("#detailTerminalBtn").addEventListener("click", () => {
-    if (!state.selected) { toast("请先选择容器"); return; }
+    if (!state.selected) { toast(uiText("请先选择容器", "Select a container first")); return; }
     selectTerminal(state.selected);
     switchView("terminal");
     connectTerminal();
@@ -5940,6 +6412,7 @@ function bindUI() {
 
 async function boot() {
   bindUI();
+  applyLocalizedDynamicLabels();
   updateNetworkModeFields();
   updateCreateStorageUI();
   updateGraphicsFlagFields("create");
@@ -5958,6 +6431,7 @@ async function boot() {
     state.authenticated = true;
     hideLogin();
     await loadSystemSettings(false).catch(() => {});
+    await savePendingInitialUILanguage().catch((err) => toast(err.message));
     await refreshAll();
   }
   restartOverviewRefreshTimer();
@@ -5970,5 +6444,42 @@ async function boot() {
     else if (state.currentView !== "overview") refreshAll();
   }, BACKGROUND_REFRESH_MS);
 }
+
+window.addEventListener("droidspaceslocalechange", () => {
+  applyLocalizedDynamicLabels();
+  renderDeviceMetrics();
+  renderOverviewContainers();
+  renderBackendSummary();
+  renderBackendDiagnostics();
+  renderHost();
+  renderContainers();
+  if (state.selectedDetail) renderDetail(state.selectedDetail);
+  renderNetwork();
+  renderSecurity();
+  renderEvents();
+  renderTasks();
+  renderRuntimeVersions();
+  renderNetworkSettings();
+  renderWebUILog();
+  renderRootfsAssets(state.rootfsAssets, state.rootfsErrors || []);
+  renderLocalRootfs();
+  renderCreateTemplatePicker();
+  updateCreateFormValidation();
+  if (state.currentView === "settings") {
+    $("#viewTitle").textContent = t("view.settings.title");
+    $("#viewSubtitle").textContent = t("view.settings.subtitle");
+  } else {
+    switchView(state.currentView, { keepMenuOpen: true, skipRootfsLoad: true, silentBatteryRedirect: true });
+  }
+});
+
+window.addEventListener("droidspacesinitiallocalechoice", (event) => {
+  const language = event.detail?.locale;
+  if (language !== "zh-CN" && language !== "en") return;
+  state.pendingInitialUILanguage = language;
+  if (state.authenticated) {
+    savePendingInitialUILanguage().catch((err) => toast(err.message));
+  }
+});
 
 boot();

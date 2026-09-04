@@ -15,35 +15,48 @@ import (
 )
 
 const (
-	ModeLocal  = "local"
-	ModePublic = "public"
+	ModeLocal                   = "local"
+	ModePublic                  = "public"
+	UILanguageSimplifiedChinese = "zh-CN"
+	UILanguageEnglish           = "en"
 )
 
 type Config struct {
-	Mode                     string             `json:"mode"`
-	Host                     string             `json:"host"`
-	Port                     int                `json:"port"`
-	AuthToken                string             `json:"authToken"`
-	DroidspacesPath          string             `json:"droidspacesPath"`
-	CorePath                 string             `json:"corePath"`
-	ImageRoot                string             `json:"imageRoot"`
-	TemplateImageRoot        string             `json:"templateImageRoot"`
-	Workspace                string             `json:"workspace"`
-	SocketdEnabled           *bool              `json:"socketdEnabled"`
-	RootfsRepositories       []RootfsRepository `json:"rootfsRepositories"`
-	RootfsSkipTLSVerify      bool               `json:"rootfsSkipTLSVerify"`
-	DefaultNATCIDR           string             `json:"defaultNatCIDR"`
-	DefaultNATThirdOctet     int                `json:"defaultNatThirdOctet"`
-	NestedAndroidNATCompat   bool               `json:"nestedAndroidNatCompat"`
-	BatteryDirectPower       bool               `json:"batteryDirectPowerSupported"`
-	BatterySeriesCells       int                `json:"batterySeriesCells"`
-	OverviewPowerEnabled     bool               `json:"overviewPowerEnabled"`
-	BatteryMonitoringEnabled bool               `json:"batteryMonitoringEnabled"`
-	BatteryDetailEnabled     bool               `json:"batteryDetailEnabled"`
-	BatteryStatsSampleSecs   int                `json:"batteryStatsSampleSeconds"`
-	BatteryStatsWriteMins    int                `json:"batteryStatsWriteMinutes"`
-	OverviewRefreshSecs      int                `json:"overviewRefreshSeconds"`
-	GeneratedAuthToken       bool               `json:"-"`
+	Mode       string `json:"mode"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	AuthToken  string `json:"authToken"`
+	UILanguage string `json:"uiLanguage"`
+	// UILanguageConfigured records whether uiLanguage was explicitly supplied
+	// by the configuration source. The zero-value default remains Chinese, but
+	// an older configuration without this key should still trigger first-visit
+	// language setup in the WebUI.
+	UILanguageConfigured bool               `json:"-"`
+	DroidspacesPath      string             `json:"droidspacesPath"`
+	CorePath             string             `json:"corePath"`
+	ImageRoot            string             `json:"imageRoot"`
+	TemplateImageRoot    string             `json:"templateImageRoot"`
+	Workspace            string             `json:"workspace"`
+	SocketdEnabled       *bool              `json:"socketdEnabled"`
+	RootfsRepositories   []RootfsRepository `json:"rootfsRepositories"`
+	// RootfsRepositoriesConfigured records whether the configuration explicitly
+	// supplied a managed lxc-image source. This lets new configurations use the
+	// UI-language default without replacing a source selected by the user.
+	RootfsRepositoriesConfigured bool   `json:"-"`
+	RootfsSkipTLSVerify          bool   `json:"rootfsSkipTLSVerify"`
+	DefaultNATCIDR               string `json:"defaultNatCIDR"`
+	DefaultNATThirdOctet         int    `json:"defaultNatThirdOctet"`
+	NestedAndroidNATCompat       bool   `json:"nestedAndroidNatCompat"`
+	BatteryDirectPower           bool   `json:"batteryDirectPowerSupported"`
+	BatterySeriesCells           int    `json:"batterySeriesCells"`
+	OverviewPowerEnabled         bool   `json:"overviewPowerEnabled"`
+	BatteryMonitoringEnabled     bool   `json:"batteryMonitoringEnabled"`
+	BatteryDetailEnabled         bool   `json:"batteryDetailEnabled"`
+	BatteryStatsSampleSecs       int    `json:"batteryStatsSampleSeconds"`
+	BatteryStatsWriteMins        int    `json:"batteryStatsWriteMinutes"`
+	BatteryStatsRetentionDays    int    `json:"batteryStatsRetentionDays"`
+	OverviewRefreshSecs          int    `json:"overviewRefreshSeconds"`
+	GeneratedAuthToken           bool   `json:"-"`
 }
 
 type RootfsRepository struct {
@@ -83,13 +96,25 @@ const (
 	legacyLinuxContainersNJURepositoryName = "Linux Containers CN（南京大学镜像）"
 )
 
-// DefaultRootfsRepositories returns the built-in template sources. lxc-image is
-// backed by the Linux Containers SimpleStreams catalog rather than rootfs.json;
-// the WebUI rootfs client recognizes that endpoint automatically.
+// DefaultRootfsRepositories returns the built-in template sources for the
+// default Simplified Chinese interface. lxc-image is backed by the Linux
+// Containers SimpleStreams catalog rather than rootfs.json; the WebUI rootfs
+// client recognizes that endpoint automatically.
 func DefaultRootfsRepositories() []RootfsRepository {
+	return DefaultRootfsRepositoriesForUILanguage(UILanguageSimplifiedChinese)
+}
+
+// DefaultRootfsRepositoriesForUILanguage returns the built-in template
+// sources for a new configuration. Chinese defaults to the Nanjing University
+// lxc-image mirror; English uses the upstream Linux Containers source.
+func DefaultRootfsRepositoriesForUILanguage(uiLanguage string) []RootfsRepository {
+	lxcImageURL := LinuxContainersRepositoryURL
+	if normalized, err := NormalizeUILanguage(uiLanguage); err == nil && normalized == UILanguageSimplifiedChinese {
+		lxcImageURL = LinuxContainersNJURepositoryURL
+	}
 	return []RootfsRepository{
 		{Name: "Droidspaces Official", URL: OfficialRootfsRepositoryURL},
-		{Name: LinuxContainersRepositoryName, URL: LinuxContainersRepositoryURL},
+		{Name: LinuxContainersRepositoryName, URL: lxcImageURL},
 	}
 }
 
@@ -97,8 +122,15 @@ func DefaultRootfsRepositories() []RootfsRepository {
 // for old webui.json files that were created before it became a built-in source.
 // It also consolidates the legacy official-plus-CN pair into one selected source.
 func EnsureDefaultRootfsRepositories(repositories []RootfsRepository) []RootfsRepository {
+	return EnsureDefaultRootfsRepositoriesForUILanguage(repositories, UILanguageSimplifiedChinese)
+}
+
+// EnsureDefaultRootfsRepositoriesForUILanguage preserves an existing managed
+// lxc-image source, including a source manually selected in Settings. It only
+// uses the language-specific default when the managed source is absent.
+func EnsureDefaultRootfsRepositoriesForUILanguage(repositories []RootfsRepository, uiLanguage string) []RootfsRepository {
 	if len(repositories) == 0 {
-		return DefaultRootfsRepositories()
+		return DefaultRootfsRepositoriesForUILanguage(uiLanguage)
 	}
 	repositories = NormalizeLinuxContainersRepositories(repositories)
 
@@ -109,7 +141,22 @@ func EnsureDefaultRootfsRepositories(repositories []RootfsRepository) []RootfsRe
 	}
 
 	result := append([]RootfsRepository(nil), repositories...)
-	return append(result, RootfsRepository{Name: LinuxContainersRepositoryName, URL: LinuxContainersRepositoryURL})
+	defaults := DefaultRootfsRepositoriesForUILanguage(uiLanguage)
+	return append(result, defaults[len(defaults)-1])
+}
+
+// ApplyUILanguageRootfsDefaults selects the language-specific lxc-image
+// default while preserving unrelated repositories. Callers use it only when
+// the managed lxc-image source was not explicitly selected by the user.
+func ApplyUILanguageRootfsDefaults(repositories []RootfsRepository, uiLanguage string) []RootfsRepository {
+	withoutManagedLXCImage := make([]RootfsRepository, 0, len(repositories))
+	for _, repository := range repositories {
+		if IsLinuxContainersRepositoryURL(repository.URL) {
+			continue
+		}
+		withoutManagedLXCImage = append(withoutManagedLXCImage, repository)
+	}
+	return EnsureDefaultRootfsRepositoriesForUILanguage(withoutManagedLXCImage, uiLanguage)
 }
 
 // IsLinuxContainersRepositoryURL identifies the managed lxc-image repository
@@ -189,6 +236,20 @@ func DefaultPath() string {
 	return filepath.Join(defaultWorkspace(IsAndroid()), "webui.json")
 }
 
+// NormalizeUILanguage returns the canonical supported WebUI language. The
+// aliases keep hand-written configuration files forgiving while persisted
+// values remain one of the two documented values.
+func NormalizeUILanguage(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "zh", "zh-cn", "zh-hans", "zh-hans-cn":
+		return UILanguageSimplifiedChinese, nil
+	case "en", "en-us", "en-gb":
+		return UILanguageEnglish, nil
+	default:
+		return "", fmt.Errorf("uiLanguage must be %q or %q", UILanguageSimplifiedChinese, UILanguageEnglish)
+	}
+}
+
 func Default() Config {
 	android := IsAndroid()
 	workspace, corePath, path, templateRoot := defaultPathLayout(android)
@@ -198,24 +259,26 @@ func Default() Config {
 		Mode:            ModeLocal,
 		Host:            "127.0.0.1",
 		Port:            9090,
+		UILanguage:      UILanguageSimplifiedChinese,
 		DroidspacesPath: path,
 		CorePath:        corePath,
 		// imageRoot remains readable for old configurations and API clients. New
 		// installs keep it aligned with the actual template storage root.
-		ImageRoot:                templateRoot,
-		TemplateImageRoot:        templateRoot,
-		Workspace:                workspace,
-		SocketdEnabled:           &socketdEnabled,
-		RootfsSkipTLSVerify:      IsAndroid(),
-		DefaultNATCIDR:           DefaultNATCIDR,
-		DefaultNATThirdOctet:     DefaultNATThirdOctet,
-		OverviewPowerEnabled:     true,
-		BatteryMonitoringEnabled: true,
-		BatteryDetailEnabled:     true,
-		BatteryStatsSampleSecs:   3,
-		BatteryStatsWriteMins:    5,
-		OverviewRefreshSecs:      3,
-		RootfsRepositories:       DefaultRootfsRepositories(),
+		ImageRoot:                 templateRoot,
+		TemplateImageRoot:         templateRoot,
+		Workspace:                 workspace,
+		SocketdEnabled:            &socketdEnabled,
+		RootfsSkipTLSVerify:       IsAndroid(),
+		DefaultNATCIDR:            DefaultNATCIDR,
+		DefaultNATThirdOctet:      DefaultNATThirdOctet,
+		OverviewPowerEnabled:      true,
+		BatteryMonitoringEnabled:  true,
+		BatteryDetailEnabled:      true,
+		BatteryStatsSampleSecs:    3,
+		BatteryStatsWriteMins:     5,
+		BatteryStatsRetentionDays: 7,
+		OverviewRefreshSecs:       3,
+		RootfsRepositories:        DefaultRootfsRepositories(),
 	}
 }
 
@@ -342,6 +405,28 @@ func loadFile(path string, cfg *Config) error {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("parse config %s: %w", path, err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	cfg.UILanguageConfigured = false
+	cfg.RootfsRepositoriesConfigured = false
+	for key, raw := range fields {
+		if strings.EqualFold(key, "uiLanguage") {
+			cfg.UILanguageConfigured = true
+		}
+		if strings.EqualFold(key, "rootfsRepositories") {
+			var repositories []RootfsRepository
+			if err := json.Unmarshal(raw, &repositories); err == nil {
+				for _, repository := range repositories {
+					if IsLinuxContainersRepositoryURL(repository.URL) {
+						cfg.RootfsRepositoriesConfigured = true
+						break
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -365,6 +450,10 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("DS_WEBUI_AUTH_TOKEN"); v != "" {
 		cfg.AuthToken = v
+	}
+	if v := os.Getenv("DS_WEBUI_UI_LANGUAGE"); v != "" {
+		cfg.UILanguage = v
+		cfg.UILanguageConfigured = true
 	}
 	if v := os.Getenv("DS_WEBUI_WORKSPACE"); v != "" {
 		cfg.Workspace = v
@@ -436,6 +525,11 @@ func applyEnv(cfg *Config) {
 			cfg.BatteryStatsWriteMins = n
 		}
 	}
+	if v := os.Getenv("DS_WEBUI_BATTERY_STATS_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.BatteryStatsRetentionDays = n
+		}
+	}
 	if v := os.Getenv("DS_WEBUI_OVERVIEW_REFRESH_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.OverviewRefreshSecs = n
@@ -505,6 +599,11 @@ func normalize(cfg *Config) error {
 		return fmt.Errorf("mode must be %q or %q", ModeLocal, ModePublic)
 	}
 	cfg.AuthToken = strings.TrimSpace(cfg.AuthToken)
+	uiLanguage, err := NormalizeUILanguage(cfg.UILanguage)
+	if err != nil {
+		return err
+	}
+	cfg.UILanguage = uiLanguage
 	cfg.GeneratedAuthToken = false
 	if cfg.Host == "" {
 		if cfg.Mode == ModePublic {
@@ -545,7 +644,11 @@ func normalize(cfg *Config) error {
 	if cfg.ImageRoot == "" {
 		cfg.ImageRoot = cfg.TemplateImageRoot
 	}
-	cfg.RootfsRepositories = EnsureDefaultRootfsRepositories(cfg.RootfsRepositories)
+	if cfg.RootfsRepositoriesConfigured {
+		cfg.RootfsRepositories = EnsureDefaultRootfsRepositoriesForUILanguage(cfg.RootfsRepositories, cfg.UILanguage)
+	} else {
+		cfg.RootfsRepositories = ApplyUILanguageRootfsDefaults(cfg.RootfsRepositories, cfg.UILanguage)
+	}
 	cfg.DefaultNATCIDR = strings.TrimSpace(cfg.DefaultNATCIDR)
 	if cfg.DefaultNATCIDR == "" {
 		cfg.DefaultNATCIDR = DefaultNATCIDR
@@ -579,6 +682,12 @@ func normalize(cfg *Config) error {
 	}
 	if cfg.BatteryStatsWriteMins < 5 || cfg.BatteryStatsWriteMins > 1440 {
 		return fmt.Errorf("batteryStatsWriteMinutes must be between 5 and 1440")
+	}
+	if cfg.BatteryStatsRetentionDays <= 0 {
+		cfg.BatteryStatsRetentionDays = 7
+	}
+	if cfg.BatteryStatsRetentionDays < 1 || cfg.BatteryStatsRetentionDays > 365 {
+		return fmt.Errorf("batteryStatsRetentionDays must be between 1 and 365")
 	}
 	if cfg.SocketdEnabled == nil {
 		socketdEnabled := IsAndroid()

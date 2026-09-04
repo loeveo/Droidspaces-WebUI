@@ -107,6 +107,7 @@ cat > "$CONFIG" <<JSON
   "host": "$HOST",
   "port": $PORT,
   "authToken": "$AUTH_TOKEN",
+  "uiLanguage": "zh-CN",
   "droidspacesPath": "$CORE/droidspaces",
   "corePath": "$CORE",
   "imageRoot": "$WORKSPACE/images",
@@ -150,10 +151,12 @@ fi
 if command -v curl >/dev/null 2>&1; then
   curl -fsS "http://${HOST}:${PORT}/" >"$WORKDIR/index.html"
   curl -fsS "http://${HOST}:${PORT}/app.js" >"$WORKDIR/app.js"
+  curl -fsS "http://${HOST}:${PORT}/i18n.js" >"$WORKDIR/i18n.js"
   curl -fsS "http://${HOST}:${PORT}/styles.css" >"$WORKDIR/styles.css"
 else
   wget -qO "$WORKDIR/index.html" "http://${HOST}:${PORT}/"
   wget -qO "$WORKDIR/app.js" "http://${HOST}:${PORT}/app.js"
+  wget -qO "$WORKDIR/i18n.js" "http://${HOST}:${PORT}/i18n.js"
   wget -qO "$WORKDIR/styles.css" "http://${HOST}:${PORT}/styles.css"
 fi
 api_get "/api/containers?all=1" >"$WORKDIR/containers.json"
@@ -161,6 +164,8 @@ api_get "/api/rootfs/local" >"$WORKDIR/rootfs-local.json"
 api_get "/api/events" >"$WORKDIR/events.json"
 api_get "/api/tasks" >"$WORKDIR/tasks.json"
 api_get "/api/host" >"$WORKDIR/host.json"
+api_get "/api/settings" >"$WORKDIR/settings.json"
+api_get "/api/battery/power?hours=8760" >"$WORKDIR/battery-power.json"
 api_get "/api/containers/demo" >"$WORKDIR/demo.json"
 api_get "/api/boot-priority" >"$WORKDIR/boot-priority.json"
 DELETE_ROOTFS_PATH=$(DELETE_ME="$TEMPLATES/delete-me.tar.gz" python3 -c 'from urllib.parse import quote; import os; print(quote(os.environ["DELETE_ME"], safe=""))')
@@ -185,11 +190,16 @@ from pathlib import Path
 root = Path(sys.argv[1])
 index = (root / 'index.html').read_text()
 app_js = (root / 'app.js').read_text()
+i18n_js = (root / 'i18n.js').read_text()
 styles = (root / 'styles.css').read_text()
 assert 'window.DS_AUTH_REQUIRED = true' in index, index[:500]
-for token in ['id="menuToggle"', 'id="menuPanel"', 'data-view="containers"', 'id="createBtn"', 'id="createVersionHint"', 'id="createTemplatePicker"', 'class="create-modal-body"', 'create-identity-fields', 'id="createValidationSummary"', 'id="createCloudRootfsSearch"', 'id="rootfsRemoteSearch"', 'id="createCloudInitField"', 'id="createCloudInitEnabled"', 'id="createCloudInitGuidedSettings"', 'id="createCloudInitUsername"', 'id="createCloudInitPassword"', 'id="createCloudInitPasswordVisibility"', 'id="createCloudInitPasswordRegenerate"', 'id="createCloudInitSSHEnabled"', 'id="createCloudInitSSHPort"', 'id="createCloudInitRootSSH"', 'id="createCloudInitUserData"', 'id="createCloudInitAdvancedField"', 'id="createCloudInitCommands"', 'id="settingsNjuMirrorEnabled"', 'id="taskStatusBtn"', 'aria-controls="taskOverviewFloat"', 'id="taskFloat"', 'id="taskOverviewFloat"', 'data-view="network"', 'data-view="security"', 'id="configModal"', 'id="bootPriorityModal"', 'id="loginOverlay"']:
+assert 'window.DS_UI_LANGUAGE_DEFAULT = "zh-CN"' in index, index[:500]
+assert 'window.DS_UI_LANGUAGE_CONFIGURED = true' in index, index[:500]
+for token in ['id="menuToggle"', 'id="menuPanel"', 'data-view="containers"', 'id="createBtn"', 'id="createVersionHint"', 'id="createTemplatePicker"', 'class="create-modal-body"', 'create-identity-fields', 'id="createValidationSummary"', 'id="createCloudRootfsSearch"', 'id="rootfsRemoteSearch"', 'id="createCloudInitField"', 'id="createCloudInitEnabled"', 'id="createCloudInitGuidedSettings"', 'id="createCloudInitUsername"', 'id="createCloudInitPassword"', 'id="createCloudInitPasswordVisibility"', 'id="createCloudInitPasswordRegenerate"', 'id="createCloudInitCommands"', 'id="settingsNjuMirrorEnabled"', 'id="settingsUILanguage"', 'id="settingsBatteryStatsRetentionDays"', 'option value="8760"', 'data-i18n="settings.uiLanguage"', 'id="taskStatusBtn"', 'aria-controls="taskOverviewFloat"', 'id="taskFloat"', 'id="taskOverviewFloat"', 'data-view="network"', 'data-view="security"', 'id="configModal"', 'id="bootPriorityModal"', 'id="localeWelcomeOverlay"', 'data-locale-choice="zh-CN"', 'data-locale-choice="en"', 'id="loginOverlay"', 'id="languageSelect"', 'data-locale-switcher', 'src="/i18n.js"']:
     assert token in index, token
-for token in ['function switchView', 'function renderSecurity', 'function renderNetwork', 'function renderRuntimeVersions', 'function clearCreateTemplateSelection', 'function setCreateTemplateSelectionLocked', 'function createTemplateVariantInfo', 'function createTemplateSupportsCloudInit', 'function isTinyCloudRootfsAsset', 'function rootfsRemoteSearchText', 'function isDroidspacesOfficialRootfsDownloadURL', 'function rootfsAssetDescription', 'function generateCloudInitRandomPassword', 'function createCloudInitSSHSettings', 'function createCloudInitSSHServiceCommand', 'function createCloudInitUserDataResult', 'function updateCreateCloudInitSSHControls', 'function updateCreateCloudInitUserDataUI', 'function updateCreateCloudInitUI', 'function updateCreateFormValidation', 'function validateCreatePortForwards', 'function renderCreateCloudTemplatePicker', 'function setLinuxContainersMirrorRepository', 'function normalizeTaskSummary', 'function renderTaskOverview', 'function settleTerminalTask', 'function submitConfig', 'function deleteLocalRootfs', 'function renderSystemdUnitInspector', 'function submitBootPriority']:
+for token in ['DS_WEBUI_LOCALE', 'DS_UI_LANGUAGE_DEFAULT', 'DS_UI_LANGUAGE_CONFIGURED', 'droidspacesinitiallocalechoice', '"zh-CN"', '"en"', 'network.autoDetected', 'Detected by the core', 'function setLocale', 'function applyTranslations', 'function updateLocaleWelcome']:
+    assert token in i18n_js, token
+for token in ['function switchView', 'function renderSecurity', 'function renderNetwork', 'function renderRuntimeVersions', 'function batteryPresentation', 'chargingPowerW', 'boardPowerEstimateW', 'Motherboard Power (estimated)', 'function clearCreateTemplateSelection', 'function setCreateTemplateSelectionLocked', 'function createTemplateVariantInfo', 'function createTemplateSupportsCloudInit', 'function isTinyCloudRootfsAsset', 'function rootfsRemoteSearchText', 'function isDroidspacesOfficialRootfsDownloadURL', 'function rootfsAssetDescription', 'function generateCloudInitRandomPassword', 'function createCloudInitSSHSettings', 'function createCloudInitSSHServiceCommand', 'function createCloudInitUserDataResult', 'function updateCreateCloudInitSSHControls', 'function updateCreateCloudInitUserDataUI', 'function updateCreateCloudInitUI', 'function updateCreateFormValidation', 'function validateCreatePortForwards', 'function renderCreateCloudTemplatePicker', 'function setLinuxContainersMirrorRepository', 'function normalizeTaskSummary', 'function renderTaskOverview', 'function settleTerminalTask', 'function submitConfig', 'function deleteLocalRootfs', 'function renderSystemdUnitInspector', 'function submitBootPriority']:
     assert token in app_js, token
 for token in ['.nav-popover', '.menu-toggle', '#menuToggle', '.rootfs-tabs', '.rootfs-tab-panel', '.terminal-screen', '.runtime-version-hint', '.rootfs-local-create', '.rootfs-local-actions', '.rootfs-cloud-description', '.template-picker-card', '.template-picker-card-description', '.template-picker-results', '.template-picker.template-selection-locked', '.cloud-init-panel', '.cloud-init-user-data', '.cloud-init-guided-settings', '.cloud-init-password-row', '.systemd-inspector', '.create-modal-body', '.task-summary-grid', '.form-validation-summary', '.field-error']:
     assert token in styles, token
@@ -203,6 +213,8 @@ rootfs = json.loads((root / 'rootfs-local.json').read_text())
 events = json.loads((root / 'events.json').read_text())
 tasks = json.loads((root / 'tasks.json').read_text())
 host = json.loads((root / 'host.json').read_text())
+settings = json.loads((root / 'settings.json').read_text())
+battery_power = json.loads((root / 'battery-power.json').read_text())
 demo = json.loads((root / 'demo.json').read_text())
 boot_priority = json.loads((root / 'boot-priority.json').read_text())
 boot_priority_update = json.loads((root / 'boot-priority-update.json').read_text())
@@ -230,6 +242,10 @@ assert host.get('goos') and host.get('goarch'), host
 assert host.get('systemVersion') and host.get('kernelVersion') is not None, host
 assert isinstance(host.get('memory'), dict), host
 assert isinstance(host.get('network'), dict), host
+assert settings.get('uiLanguage') == 'zh-CN', settings
+assert settings.get('batteryStatsRetentionDays') == 7, settings
+assert any(item.get('url') == 'https://mirror.nju.edu.cn/lxc-images/' for item in settings.get('rootfsRepositories', [])), settings
+assert battery_power.get('hours') == 8760, battery_power
 assert any(item.get('key') == 'workspace' and item.get('exists') for item in host.get('paths', [])), host
 assert demo.get('name') == 'demo', demo
 assert demo.get('rootfsPath', '').endswith('/Containers/demo/rootfs'), demo

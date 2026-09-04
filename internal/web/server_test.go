@@ -87,10 +87,14 @@ func TestNewServerDefaultsPathsFromWorkspace(t *testing.T) {
 	if srv.imageRoot != srv.templateImageRoot {
 		t.Fatalf("imageRoot = %q, want %q", srv.imageRoot, srv.templateImageRoot)
 	}
+	if srv.uiLanguage != config.UILanguageSimplifiedChinese {
+		t.Fatalf("uiLanguage = %q, want %q", srv.uiLanguage, config.UILanguageSimplifiedChinese)
+	}
 }
 
 func TestSystemSettingsEmptyPathsUseWorkspaceLayout(t *testing.T) {
 	srv, _, _ := newTestServer(t)
+	srv.uiLanguage = config.UILanguageEnglish
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	settings, err := srv.normalizeSystemSettings(systemSettingsRequest{
 		Mode:      config.ModeLocal,
@@ -115,6 +119,9 @@ func TestSystemSettingsEmptyPathsUseWorkspaceLayout(t *testing.T) {
 	}
 	if settings.ImageRoot != settings.TemplateImageRoot {
 		t.Fatalf("imageRoot = %q, want %q", settings.ImageRoot, settings.TemplateImageRoot)
+	}
+	if settings.UILanguage != config.UILanguageEnglish {
+		t.Fatalf("uiLanguage = %q, want existing %q", settings.UILanguage, config.UILanguageEnglish)
 	}
 }
 
@@ -553,6 +560,47 @@ func TestReadBatteryReportUsesInputPowerWhenBatteryCurrentIsZero(t *testing.T) {
 	}
 }
 
+func TestReadBatteryReportSeparatesInputAndBatteryChargePower(t *testing.T) {
+	dir := t.TempDir()
+	battery := filepath.Join(dir, "battery")
+	usb := filepath.Join(dir, "usb")
+	for _, path := range []string{battery, usb} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writes := map[string]string{
+		filepath.Join(battery, "type"):        "Battery\n",
+		filepath.Join(battery, "status"):      "Charging\n",
+		filepath.Join(battery, "current_now"): "896000\n",
+		filepath.Join(battery, "voltage_now"): "7664000\n",
+		filepath.Join(battery, "power_now"):   "6672731\n",
+		filepath.Join(usb, "type"):            "USB_PD\n",
+		filepath.Join(usb, "online"):          "1\n",
+		filepath.Join(usb, "current_now"):     "994000\n",
+		filepath.Join(usb, "voltage_now"):     "8750000\n",
+	}
+	for path, value := range writes {
+		if err := os.WriteFile(path, []byte(value), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldRoot := powerSupplyRoot
+	powerSupplyRoot = dir
+	t.Cleanup(func() { powerSupplyRoot = oldRoot })
+
+	report := readBatteryReport()
+	if !report.HasInputPower || math.Abs(report.InputPowerW-8.6975) > 0.000001 {
+		t.Fatalf("physical input power was not read: %+v", report)
+	}
+	if !report.HasChargingPower || math.Abs(report.ChargingPowerW-6.866944) > 0.000001 {
+		t.Fatalf("battery charge power was not read: %+v", report)
+	}
+	if !report.HasBoardPowerEstimate || math.Abs(report.BoardPowerEstimateW-1.830556) > 0.000001 {
+		t.Fatalf("board power estimate should use both physical readings: %+v", report)
+	}
+}
+
 func TestReadBatteryReportPrefersPhysicalUSBPDMeasurementOverUCSIContract(t *testing.T) {
 	dir := t.TempDir()
 	battery := filepath.Join(dir, "battery")
@@ -854,6 +902,55 @@ func TestNormalizeBatteryReportPowerModes(t *testing.T) {
 	}
 }
 
+func TestNormalizeBatteryReportSplitsInputAndBatteryChargePower(t *testing.T) {
+	report := normalizeBatteryReport(batteryReport{
+		Available:      true,
+		Status:         "Charging",
+		PowerW:         -6.672731,
+		HasPower:       true,
+		InputPowerW:    8.6975,
+		HasInputPower:  true,
+		InputPowerKind: "measured",
+		InputOnline:    true,
+	}, true)
+
+	if report.PowerMode != "charging" || report.DirectPowerActive {
+		t.Fatalf("charging battery must not be reported as bypass power: %+v", report)
+	}
+	if !report.HasChargingPower || math.Abs(report.ChargingPowerW-6.672731) > 0.000001 {
+		t.Fatalf("battery charge power was not normalized: %+v", report)
+	}
+	if !report.HasBoardPowerEstimate || math.Abs(report.BoardPowerEstimateW-2.024769) > 0.000001 {
+		t.Fatalf("board power estimate should be input minus battery charge: %+v", report)
+	}
+}
+
+func TestNormalizeBatteryReportDoesNotDeriveBoardPowerFromInvalidInput(t *testing.T) {
+	tests := []batteryReport{
+		{
+			Available: true, Status: "Charging", PowerW: 4, HasPower: true,
+			InputPowerW: 3, HasInputPower: true, InputPowerKind: "measured",
+		},
+		{
+			Available: true, Status: "Charging", PowerW: 4, HasPower: true,
+			InputPowerW: 9, HasInputPower: true, InputPowerKind: "pd-contract",
+		},
+		{
+			Available: true, Status: "Charging", PowerW: 4, HasPower: true,
+			InputPowerW: 9, HasInputPower: true, InputPowerKind: "average",
+		},
+	}
+	for _, input := range tests {
+		report := normalizeBatteryReport(input, true)
+		if !report.HasChargingPower {
+			t.Fatalf("valid battery charge must remain available: %+v", report)
+		}
+		if report.HasBoardPowerEstimate {
+			t.Fatalf("invalid input must not produce a board power estimate: %+v", report)
+		}
+	}
+}
+
 func TestBatteryStatsRuntimeOnlyForNormalizedDischarge(t *testing.T) {
 	directServer, _, _ := newTestServer(t)
 	directServer.batteryDirectPower = true
@@ -972,27 +1069,20 @@ func TestBatteryStatsTracksDischargeAndRuntime(t *testing.T) {
 	if !stats.HasRuntime || math.Abs(stats.RuntimeHours-7) > 0.000001 {
 		t.Fatalf("runtime mismatch: %+v", stats)
 	}
-	data, err := os.ReadFile(filepath.Join(workspace, batteryStatsFileName))
+	dailyPath := batteryStatsDailyFilePath(filepath.Join(workspace, batteryStatsDirectoryName), now.Add(10*time.Minute).Unix())
+	data, err := os.ReadFile(dailyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Count(string(data), "\n"); got != 2 {
 		t.Fatalf("expected two persisted samples, got %d: %s", got, data)
 	}
-	rawCheckpoint, err := os.ReadFile(filepath.Join(workspace, batteryStatsDBFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var checkpoint batteryStatsCheckpoint
-	if err := json.Unmarshal(rawCheckpoint, &checkpoint); err != nil {
-		t.Fatal(err)
-	}
-	if checkpoint.SampleCount != 2 || math.Abs(checkpoint.DischargeWh-4) > 0.000001 {
-		t.Fatalf("checkpoint mismatch: %+v", checkpoint)
+	if _, err := os.Stat(filepath.Join(workspace, batteryStatsDBFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("daily store must not write legacy checkpoint, err=%v", err)
 	}
 }
 
-func TestBatteryStatsLoadsCheckpointAndReplaysLaterSamples(t *testing.T) {
+func TestBatteryStatsIgnoresLegacyCheckpoint(t *testing.T) {
 	srv, workspace, _ := newTestServer(t)
 	first := batteryStatsSample{
 		Time:            1700000000,
@@ -1011,40 +1101,31 @@ func TestBatteryStatsLoadsCheckpointAndReplaysLaterSamples(t *testing.T) {
 	third.CapacityPercent = 60
 	third.EnergyWh = 24
 
-	state := batteryStatsState{
-		path:                  filepath.Join(workspace, batteryStatsFileName),
-		checkpointPath:        filepath.Join(workspace, batteryStatsDBFileName),
-		loaded:                true,
-		sampleCount:           2,
-		lastSample:            second,
-		hasLastSample:         true,
-		dischargeWh:           4,
-		trackedRemainingWh:    28,
-		hasTrackedRemaining:   true,
-		trackedSource:         "energy",
-		loadedFromCheckpoint:  true,
-		checkpointSampleTime:  second.Time,
-		checkpointSampleCount: 2,
-	}
-	if err := appendBatteryStatsSample(state.path, first); err != nil {
+	storageRoot := filepath.Join(workspace, batteryStatsDirectoryName)
+	dailyPath := batteryStatsDailyFilePath(storageRoot, first.Time)
+	if err := appendBatteryStatsSamples(dailyPath, []batteryStatsSample{first, second, third}); err != nil {
 		t.Fatal(err)
 	}
-	if err := appendBatteryStatsSample(state.path, second); err != nil {
+	legacyCheckpoint := map[string]any{
+		"version":              1,
+		"sampleCount":          815000,
+		"lastSample":           third,
+		"hasLastSample":        true,
+		"dischargeWh":          99999,
+		"checkpointSampleTime": third.Time,
+	}
+	rawCheckpoint, err := json.Marshal(legacyCheckpoint)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeBatteryStatsCheckpoint(state.checkpointPath, state); err != nil {
-		t.Fatal(err)
-	}
-	if err := appendBatteryStatsSample(state.path, third); err != nil {
-		t.Fatal(err)
-	}
+	mustWriteFile(t, filepath.Join(workspace, batteryStatsDBFileName), rawCheckpoint, 0644)
 
-	srv.loadBatteryStatsLocked(filepath.Join(workspace, batteryStatsFileName))
+	srv.loadBatteryStatsLocked(storageRoot, time.Unix(third.Time, 0))
 	if srv.batteryStats.sampleCount != 3 {
-		t.Fatalf("sample count mismatch after checkpoint replay: %+v", srv.batteryStats)
+		t.Fatalf("legacy checkpoint must not affect daily sample count: %+v", srv.batteryStats)
 	}
 	if math.Abs(srv.batteryStats.dischargeWh-8) > 0.000001 {
-		t.Fatalf("discharge mismatch after checkpoint replay: %+v", srv.batteryStats)
+		t.Fatalf("discharge mismatch from daily samples: %+v", srv.batteryStats)
 	}
 	if srv.batteryStats.lastSample.Time != third.Time {
 		t.Fatalf("last sample mismatch: %+v", srv.batteryStats.lastSample)
@@ -1081,19 +1162,172 @@ func TestBatteryStatsBuffersSamplesUntilWriteInterval(t *testing.T) {
 	if stats.SampleCount != 2 || stats.PendingSampleCount != 2 {
 		t.Fatalf("expected second sample buffered in memory: %+v", stats)
 	}
-	if _, err := os.Stat(filepath.Join(workspace, batteryStatsFileName)); !errors.Is(err, os.ErrNotExist) {
+	storageRoot := filepath.Join(workspace, batteryStatsDirectoryName)
+	if _, err := os.Stat(storageRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sample log should not be written before write interval, err=%v", err)
 	}
 	stats = srv.updateBatteryStats(third, now.Add(5*time.Minute))
 	if stats.SampleCount != 3 || stats.PendingSampleCount != 0 {
 		t.Fatalf("expected pending samples flushed: %+v", stats)
 	}
-	data, err := os.ReadFile(filepath.Join(workspace, batteryStatsFileName))
+	data, err := os.ReadFile(batteryStatsDailyFilePath(storageRoot, now.Add(5*time.Minute).Unix()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Count(string(data), "\n"); got != 3 {
 		t.Fatalf("expected three samples flushed together, got %d: %s", got, data)
+	}
+}
+
+func TestBatteryStatsStoresSamplesInLocalDailyFiles(t *testing.T) {
+	srv, workspace, _ := newTestServer(t)
+	firstAt := time.Date(2031, time.January, 2, 23, 58, 0, 0, time.Local)
+	secondAt := firstAt.Add(6 * time.Minute)
+	report := batteryReport{
+		Available:       true,
+		Status:          "Discharging",
+		CapacityPercent: 80,
+		PowerW:          -4,
+		HasCapacity:     true,
+		HasPower:        true,
+	}
+	if stats := srv.updateBatteryStats(report, firstAt); stats.PendingSampleCount != 1 {
+		t.Fatalf("first daily sample stats: %+v", stats)
+	}
+	report.CapacityPercent = 79
+	stats := srv.updateBatteryStats(report, secondAt)
+	if stats.SampleCount != 2 || stats.PendingSampleCount != 0 {
+		t.Fatalf("cross-day samples did not flush: %+v", stats)
+	}
+
+	storageRoot := filepath.Join(workspace, batteryStatsDirectoryName)
+	for _, timestamp := range []int64{firstAt.Unix(), secondAt.Unix()} {
+		data, err := os.ReadFile(batteryStatsDailyFilePath(storageRoot, timestamp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(string(data), "\n"); got != 1 {
+			t.Fatalf("daily file for %s has %d rows, want 1: %s", batteryStatsDayKey(timestamp), got, data)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace, batteryStatsFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy single-file store must not be recreated, err=%v", err)
+	}
+}
+
+func TestBatteryStatsDeletedDailyFileDoesNotRestoreLegacyCheckpoint(t *testing.T) {
+	srv, workspace, _ := newTestServer(t)
+	now := time.Date(2031, time.January, 2, 12, 0, 0, 0, time.Local)
+	report := batteryReport{
+		Available:       true,
+		Status:          "Discharging",
+		CapacityPercent: 80,
+		PowerW:          -4,
+		HasCapacity:     true,
+		HasPower:        true,
+	}
+	srv.updateBatteryStats(report, now)
+	report.CapacityPercent = 79
+	if stats := srv.updateBatteryStats(report, now.Add(5*time.Minute)); stats.SampleCount != 2 || stats.PendingSampleCount != 0 {
+		t.Fatalf("expected persisted samples before deletion: %+v", stats)
+	}
+
+	storageRoot := filepath.Join(workspace, batteryStatsDirectoryName)
+	dailyPath := batteryStatsDailyFilePath(storageRoot, now.Unix())
+	legacy := map[string]any{"version": 1, "sampleCount": 815000, "lastSample": batteryStatsSample{Time: now.Unix(), HasCapacity: true}, "hasLastSample": true}
+	rawLegacy, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(workspace, batteryStatsDBFileName), rawLegacy, 0644)
+	if err := os.Remove(dailyPath); err != nil {
+		t.Fatal(err)
+	}
+
+	report.CapacityPercent = 78
+	stats := srv.updateBatteryStats(report, now.Add(10*time.Minute))
+	if stats.SampleCount != 1 || stats.PendingSampleCount != 1 {
+		t.Fatalf("deleted source data must reset live totals instead of restoring checkpoint: %+v", stats)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, batteryStatsDBFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy checkpoint must be retired after daily-store initialization, err=%v", err)
+	}
+}
+
+func TestBatteryStatsMigratesLegacyFileWithinDefaultRetention(t *testing.T) {
+	srv, workspace, _ := newTestServer(t)
+	now := time.Date(2031, time.January, 8, 12, 0, 0, 0, time.Local)
+	legacyPath := filepath.Join(workspace, batteryStatsFileName)
+	for dayOffset := -7; dayOffset <= 0; dayOffset++ {
+		sampleAt := now.AddDate(0, 0, dayOffset)
+		sample := batteryStatsSample{Time: sampleAt.Unix(), CapacityPercent: float64(80 + dayOffset), HasCapacity: true}
+		if err := appendBatteryStatsSample(legacyPath, sample); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWriteFile(t, filepath.Join(workspace, batteryStatsDBFileName), []byte(`{"version":1,"sampleCount":815000}`), 0644)
+
+	storageRoot := filepath.Join(workspace, batteryStatsDirectoryName)
+	srv.loadBatteryStatsLocked(storageRoot, now)
+	if srv.batteryStats.sampleCount != batteryStatsDefaultRetentionDays {
+		t.Fatalf("migrated sample count = %d, want %d", srv.batteryStats.sampleCount, batteryStatsDefaultRetentionDays)
+	}
+	files, err := listBatteryStatsDailyFiles(storageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != batteryStatsDefaultRetentionDays {
+		t.Fatalf("migrated daily files = %d, want %d", len(files), batteryStatsDefaultRetentionDays)
+	}
+	if _, err := os.Stat(batteryStatsDailyFilePath(storageRoot, now.AddDate(0, 0, -7).Unix())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("day outside retention should not be migrated, err=%v", err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy single-file store must be retired after migration, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, batteryStatsDBFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy checkpoint must be retired after migration, err=%v", err)
+	}
+}
+
+func TestBatteryPowerRangeEnforcesDailyRetention(t *testing.T) {
+	srv, workspace, _ := newTestServer(t)
+	now := time.Date(2031, time.January, 8, 12, 0, 0, 0, time.Local)
+	storageRoot := filepath.Join(workspace, batteryStatsDirectoryName)
+	for dayOffset := -7; dayOffset <= 0; dayOffset++ {
+		sampleAt := now.AddDate(0, 0, dayOffset)
+		sample := batteryStatsSample{Time: sampleAt.Unix(), CapacityPercent: float64(80 + dayOffset), HasCapacity: true, PowerW: -2, HasPower: true, Status: "Discharging"}
+		if err := appendBatteryStatsSample(batteryStatsDailyFilePath(storageRoot, sample.Time), sample); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := srv.batteryPowerRangeReport(168, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SampleCount != batteryStatsDefaultRetentionDays {
+		t.Fatalf("retained power range count = %d, want %d", report.SampleCount, batteryStatsDefaultRetentionDays)
+	}
+	if _, err := os.Stat(batteryStatsDailyFilePath(storageRoot, now.AddDate(0, 0, -7).Unix())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired daily data must be pruned before reporting, err=%v", err)
+	}
+}
+
+func TestBatteryPowerRangeEndpointAcceptsConfiguredMaximum(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	handler := srv.Handler()
+
+	accepted := httptest.NewRecorder()
+	handler.ServeHTTP(accepted, httptest.NewRequest(http.MethodGet, "/api/battery/power?token=secret&hours=8760", nil))
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("365-day power range status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, httptest.NewRequest(http.MethodGet, "/api/battery/power?token=secret&hours=8761", nil))
+	if rejected.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-range power request status=%d body=%s", rejected.Code, rejected.Body.String())
 	}
 }
 
@@ -1506,7 +1740,7 @@ func TestWebUILogEndpointRejectsSymlink(t *testing.T) {
 
 func TestStaticUIResponsesRevalidate(t *testing.T) {
 	srv, _, _ := newTestServer(t)
-	for _, path := range []string{"/", "/app.js", "/styles.css", "/assets/distro/ubuntu.svg"} {
+	for _, path := range []string{"/", "/app.js", "/i18n.js", "/styles.css", "/assets/distro/ubuntu.svg"} {
 		t.Run(path, func(t *testing.T) {
 			res := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, path, nil))
@@ -1517,6 +1751,35 @@ func TestStaticUIResponsesRevalidate(t *testing.T) {
 				t.Fatalf("Cache-Control=%q, want no-cache", got)
 			}
 		})
+	}
+}
+
+func TestIndexInjectsDefaultUILanguage(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.uiLanguage = config.UILanguageEnglish
+	srv.uiLanguageConfigured = true
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `window.DS_UI_LANGUAGE_DEFAULT = "en"`) {
+		t.Fatalf("index did not inject the configured UI language: %s", res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `window.DS_UI_LANGUAGE_CONFIGURED = true`) {
+		t.Fatalf("index did not report configured UI language: %s", res.Body.String())
+	}
+}
+
+func TestIndexMarksMissingUILanguageForFirstVisitSetup(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `window.DS_UI_LANGUAGE_CONFIGURED = false`) {
+		t.Fatalf("index did not mark missing UI language: %s", res.Body.String())
 	}
 }
 
@@ -2534,6 +2797,7 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 		"host":                        "0.0.0.0",
 		"port":                        9191,
 		"authToken":                   "newsecret",
+		"uiLanguage":                  "en",
 		"droidspacesPath":             srv.droidspacesPath,
 		"corePath":                    srv.corePath,
 		"imageRoot":                   srv.imageRoot,
@@ -2551,6 +2815,7 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 		"batteryDetailEnabled":        false,
 		"batteryStatsSampleSeconds":   5,
 		"batteryStatsWriteMinutes":    6,
+		"batteryStatsRetentionDays":   12,
 		"overviewRefreshSeconds":      9,
 		"rootfsRepositories": []map[string]string{{
 			"name": "Mirror",
@@ -2579,6 +2844,12 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	if srv.authToken != "newsecret" {
 		t.Fatalf("runtime auth not updated: %s", srv.authToken)
 	}
+	if srv.uiLanguage != config.UILanguageEnglish || settingsResp["uiLanguage"] != config.UILanguageEnglish {
+		t.Fatalf("UI language not updated: runtime=%q response=%#v", srv.uiLanguage, settingsResp)
+	}
+	if !srv.uiLanguageConfigured || settingsResp["uiLanguageConfigured"] != true {
+		t.Fatalf("UI language should be marked configured: runtime=%v response=%#v", srv.uiLanguageConfigured, settingsResp)
+	}
 	if srv.socketdEnabled || srv.rootfsSkipTLSVerify || len(srv.rootfsRepos) != 1 || srv.rootfsRepos[0].Name != "Mirror" {
 		t.Fatalf("runtime advanced settings not updated: socketd=%v tls=%v repos=%#v", srv.socketdEnabled, srv.rootfsSkipTLSVerify, srv.rootfsRepos)
 	}
@@ -2606,6 +2877,9 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	if got := srv.batteryStatsWriteMinutes(); got != 6 {
 		t.Fatalf("battery stats write setting not applied: %d", got)
 	}
+	if got := srv.batteryStatsRetentionDaysSetting(); got != 12 {
+		t.Fatalf("battery stats retention setting not applied: %d", got)
+	}
 	if srv.overviewRefreshSecs != 9 {
 		t.Fatalf("overview refresh setting not applied: %d", srv.overviewRefreshSecs)
 	}
@@ -2623,6 +2897,9 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	}
 	if persisted["mode"] != "public" || persisted["host"] != "0.0.0.0" || int(persisted["port"].(float64)) != 9191 || persisted["authToken"] != "newsecret" {
 		t.Fatalf("core settings not persisted: %#v", persisted)
+	}
+	if persisted["uiLanguage"] != config.UILanguageEnglish {
+		t.Fatalf("UI language not persisted: %#v", persisted)
 	}
 	if persisted["batteryDirectPowerSupported"] != true {
 		t.Fatalf("battery direct power setting not persisted: %#v", persisted)
@@ -2642,6 +2919,9 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	if int(persisted["batteryStatsWriteMinutes"].(float64)) != 6 {
 		t.Fatalf("battery stats write setting not persisted: %#v", persisted)
 	}
+	if int(persisted["batteryStatsRetentionDays"].(float64)) != 12 {
+		t.Fatalf("battery stats retention setting not persisted: %#v", persisted)
+	}
 	if int(persisted["overviewRefreshSeconds"].(float64)) != 9 {
 		t.Fatalf("overview refresh setting not persisted: %#v", persisted)
 	}
@@ -2660,6 +2940,83 @@ func TestSystemSettingsPersistConfig(t *testing.T) {
 	handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/status?token=newsecret", nil))
 	if status.Code != http.StatusOK {
 		t.Fatalf("status with updated token=%d body=%s", status.Code, status.Body.String())
+	}
+}
+
+func TestUILanguageSettingsPersistConfig(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.configPath = filepath.Join(t.TempDir(), "webui.json")
+	if err := os.WriteFile(srv.configPath, []byte(`{"_note":"keep"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/settings/ui-language?token=secret", strings.NewReader(`{"uiLanguage":"en-US"}`)))
+	if res.Code != http.StatusOK {
+		t.Fatalf("language settings status=%d body=%s", res.Code, res.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["uiLanguage"] != config.UILanguageEnglish || body["uiLanguageConfigured"] != true {
+		t.Fatalf("unexpected language settings response: %#v", body)
+	}
+	repositories, ok := body["rootfsRepositories"].([]any)
+	if !ok || len(repositories) != 2 {
+		t.Fatalf("language settings did not return repositories: %#v", body["rootfsRepositories"])
+	}
+	lxcImage, ok := repositories[1].(map[string]any)
+	if !ok || lxcImage["url"] != config.LinuxContainersRepositoryURL {
+		t.Fatalf("English first-visit default should use the official source: %#v", repositories)
+	}
+	if srv.uiLanguage != config.UILanguageEnglish || !srv.uiLanguageConfigured {
+		t.Fatalf("runtime language not updated: language=%q configured=%v", srv.uiLanguage, srv.uiLanguageConfigured)
+	}
+	if !srv.rootfsReposConfigured || len(srv.rootfsRepos) != 2 || srv.rootfsRepos[1].URL != config.LinuxContainersRepositoryURL {
+		t.Fatalf("runtime rootfs source not initialized from first language choice: %#v", srv.rootfsRepos)
+	}
+
+	var persisted map[string]any
+	if err := json.Unmarshal(mustReadFile(t, srv.configPath), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted["_note"] != "keep" || persisted["uiLanguage"] != config.UILanguageEnglish {
+		t.Fatalf("language setting not persisted: %#v", persisted)
+	}
+	persistedRepositories, ok := persisted["rootfsRepositories"].([]any)
+	if !ok || len(persistedRepositories) != 2 {
+		t.Fatalf("language default source not persisted: %#v", persisted["rootfsRepositories"])
+	}
+
+	invalid := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(invalid, httptest.NewRequest(http.MethodPut, "/api/settings/ui-language?token=secret", strings.NewReader(`{"uiLanguage":"fr"}`)))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid language status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestUILanguageSettingsPreservesConfiguredLXCImageSource(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	srv.configPath = filepath.Join(t.TempDir(), "webui.json")
+	if err := os.WriteFile(srv.configPath, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv.rootfsCacheMu.Lock()
+	srv.rootfsRepos = []config.RootfsRepository{
+		{Name: "Droidspaces Official", URL: config.OfficialRootfsRepositoryURL},
+		{Name: config.LinuxContainersRepositoryName, URL: config.LinuxContainersNJURepositoryURL},
+	}
+	srv.rootfsReposConfigured = true
+	srv.rootfsCacheMu.Unlock()
+
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/settings/ui-language?token=secret", strings.NewReader(`{"uiLanguage":"en"}`)))
+	if res.Code != http.StatusOK {
+		t.Fatalf("language settings status=%d body=%s", res.Code, res.Body.String())
+	}
+	if len(srv.rootfsRepos) != 2 || srv.rootfsRepos[1].URL != config.LinuxContainersNJURepositoryURL {
+		t.Fatalf("configured lxc-image source was overwritten: %#v", srv.rootfsRepos)
 	}
 }
 
@@ -2708,29 +3065,31 @@ func TestBatteryMonitoringDisabledEndpoints(t *testing.T) {
 
 func currentSystemSettingsForTest(srv *Server) normalizedSystemSettings {
 	return normalizedSystemSettings{
-		Mode:                     srv.mode,
-		Host:                     srv.host,
-		Port:                     srv.port,
-		AuthToken:                srv.authToken,
-		DroidspacesPath:          srv.droidspacesPath,
-		CorePath:                 srv.corePath,
-		ImageRoot:                srv.imageRoot,
-		TemplateImageRoot:        srv.templateImageRoot,
-		Workspace:                srv.workspace,
-		SocketdEnabled:           srv.socketdEnabled,
-		RootfsSkipTLSVerify:      srv.rootfsSkipTLSVerify,
-		DefaultNATCIDR:           srv.defaultNATCIDR,
-		DefaultNATThirdOctet:     srv.defaultNATThirdOctet,
-		NestedAndroidNATCompat:   srv.nestedAndroidNATCompatEnabled(),
-		BatteryDirectPower:       srv.batteryDirectPower,
-		BatterySeriesCells:       srv.batterySeriesCells,
-		OverviewPowerEnabled:     srv.overviewPowerEnabledSetting(),
-		BatteryMonitoringEnabled: srv.batteryMonitoringEnabledSetting(),
-		BatteryDetailEnabled:     srv.batteryDetailEnabled,
-		BatteryStatsSampleSecs:   srv.batteryStatsSampleSeconds(),
-		BatteryStatsWriteMins:    srv.batteryStatsWriteMinutes(),
-		OverviewRefreshSecs:      srv.overviewRefreshSecs,
-		RootfsRepositories:       append([]config.RootfsRepository(nil), srv.rootfsRepos...),
+		Mode:                      srv.mode,
+		Host:                      srv.host,
+		Port:                      srv.port,
+		AuthToken:                 srv.authToken,
+		UILanguage:                srv.uiLanguage,
+		DroidspacesPath:           srv.droidspacesPath,
+		CorePath:                  srv.corePath,
+		ImageRoot:                 srv.imageRoot,
+		TemplateImageRoot:         srv.templateImageRoot,
+		Workspace:                 srv.workspace,
+		SocketdEnabled:            srv.socketdEnabled,
+		RootfsSkipTLSVerify:       srv.rootfsSkipTLSVerify,
+		DefaultNATCIDR:            srv.defaultNATCIDR,
+		DefaultNATThirdOctet:      srv.defaultNATThirdOctet,
+		NestedAndroidNATCompat:    srv.nestedAndroidNATCompatEnabled(),
+		BatteryDirectPower:        srv.batteryDirectPower,
+		BatterySeriesCells:        srv.batterySeriesCells,
+		OverviewPowerEnabled:      srv.overviewPowerEnabledSetting(),
+		BatteryMonitoringEnabled:  srv.batteryMonitoringEnabledSetting(),
+		BatteryDetailEnabled:      srv.batteryDetailEnabled,
+		BatteryStatsSampleSecs:    srv.batteryStatsSampleSeconds(),
+		BatteryStatsWriteMins:     srv.batteryStatsWriteMinutes(),
+		BatteryStatsRetentionDays: srv.batteryStatsRetentionDaysSetting(),
+		OverviewRefreshSecs:       srv.overviewRefreshSecs,
+		RootfsRepositories:        append([]config.RootfsRepository(nil), srv.rootfsRepos...),
 	}
 }
 
